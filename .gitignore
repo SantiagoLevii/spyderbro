@@ -1,0 +1,17 @@
+venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+output/
+.cache/
+.checkpoints/
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+scraping.log
+.coverage
+.idea/
+.vscode/
