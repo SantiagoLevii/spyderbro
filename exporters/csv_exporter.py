@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -20,15 +21,44 @@ DATA_FONT = Font(color="000000", size=10)
 TOTALS_FONT = Font(color="FFFFFF", bold=True, size=10)
 EDGE_SIDE = Side(style="thin", color="CCCCCC")
 
-COLUMNS: list[tuple[str, str, int]] = [
-    ("Name", "name", 30),
-    ("Email", "email", 30),
-    ("Phone", "phone", 18),
-    ("Website", "website", 35),
-    ("Address", "address", 40),
-    ("Category", "category", 20),
-    ("Rating", "rating", 10),
-    ("Source", "source", 15),
+# A column is (header, width, getter) where getter(lead) -> cell value.
+Column = tuple[str, int, Callable[[Lead], object]]
+
+
+def _field(name: str) -> Callable[[Lead], object]:
+    """Getter that reads a base Lead field via to_dict()."""
+    return lambda lead: lead.to_dict().get(name, "")
+
+
+def _raw(key: str) -> Callable[[Lead], object]:
+    """Getter that reads a key from a Lead's raw_data."""
+    return lambda lead: (lead.raw_data or {}).get(key, "")
+
+
+def _entity_type(lead: Lead) -> str:
+    """Human-readable entity type from raw_data (Física / Jurídica)."""
+    value = (lead.raw_data or {}).get("entity_type", "")
+    return {"fisica": "Física", "juridica": "Jurídica"}.get(value, "")
+
+
+BASE_COLUMNS: list[Column] = [
+    ("Name", 30, _field("name")),
+    ("Email", 30, _field("email")),
+    ("Phone", 18, _field("phone")),
+    ("Website", 35, _field("website")),
+    ("Address", 40, _field("address")),
+    ("Category", 20, _field("category")),
+    ("Rating", 10, _field("rating")),
+    ("Source", 15, _field("source")),
+]
+
+DATEAS_COLUMNS: list[Column] = [
+    ("DNI", 15, _raw("dni")),
+    ("CUIT/CUIL", 18, _raw("cuit")),
+    ("Edad", 8, _raw("age")),
+    ("Provincia", 20, _raw("province")),
+    ("Localidad", 25, _raw("locality")),
+    ("Tipo", 12, _entity_type),
 ]
 
 HEADER_ROW_HEIGHT = 20
@@ -40,6 +70,9 @@ class CSVExporter:
 
     Kept under the historical CSVExporter name: the CLI's --output csv now
     produces .xlsx because a formatted sheet is more useful than plain CSV.
+    Columns are dynamic: the six Dateas-specific columns (DNI, CUIT, age,
+    province, locality, entity type) are appended only when the result set
+    contains leads from the ``dateas`` source.
     """
 
     def export(self, leads: list[Lead], filename: str) -> str:
@@ -57,28 +90,36 @@ class CSVExporter:
         if not leads:
             logger.warning("No leads to export — writing empty workbook at %s", path)
 
+        columns = self._columns_for(leads)
+
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = SHEET_NAME
 
-        self._write_header(sheet)
+        self._write_header(sheet, columns)
         for row_index, lead in enumerate(leads, start=2):
-            self._write_data_row(sheet, row_index, lead)
+            self._write_data_row(sheet, row_index, lead, columns)
         totals_row = len(leads) + 2
-        self._write_totals_row(sheet, totals_row, leads)
-        self._apply_outer_border(sheet, totals_row)
+        self._write_totals_row(sheet, totals_row, leads, columns)
+        self._apply_outer_border(sheet, totals_row, len(columns))
 
         sheet.freeze_panes = "A2"
-        sheet.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}1"
+        sheet.auto_filter.ref = f"A1:{get_column_letter(len(columns))}1"
 
         workbook.save(path)
-        logger.info("XLSX exported: %s (%d leads)", path, len(leads))
+        logger.info("XLSX exported: %s (%d leads, %d columns)", path, len(leads), len(columns))
         return str(path.resolve())
 
     @staticmethod
-    def _write_header(sheet) -> None:
+    def _columns_for(leads: list[Lead]) -> list[Column]:
+        """Return base columns plus Dateas columns when dateas leads are present."""
+        has_dateas = any(lead.source == "dateas" for lead in leads)
+        return BASE_COLUMNS + DATEAS_COLUMNS if has_dateas else list(BASE_COLUMNS)
+
+    @staticmethod
+    def _write_header(sheet, columns: list[Column]) -> None:
         """Write the styled header row (dark blue, white bold text)."""
-        for col_index, (header, _, width) in enumerate(COLUMNS, start=1):
+        for col_index, (header, width, _) in enumerate(columns, start=1):
             cell = sheet.cell(row=1, column=col_index, value=header)
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
@@ -86,47 +127,56 @@ class CSVExporter:
         sheet.row_dimensions[1].height = HEADER_ROW_HEIGHT
 
     @staticmethod
-    def _write_data_row(sheet, row_index: int, lead: Lead) -> None:
+    def _write_data_row(sheet, row_index: int, lead: Lead, columns: list[Column]) -> None:
         """Write one lead row with alternating background fill."""
-        data = lead.to_dict()
-        for col_index, (_, field, _) in enumerate(COLUMNS, start=1):
-            cell = sheet.cell(row=row_index, column=col_index, value=data.get(field, ""))
+        for col_index, (_, _, getter) in enumerate(columns, start=1):
+            cell = sheet.cell(row=row_index, column=col_index, value=getter(lead))
             cell.font = DATA_FONT
             if row_index % 2 != 0:
                 cell.fill = ODD_ROW_FILL
         sheet.row_dimensions[row_index].height = DATA_ROW_HEIGHT
 
     @staticmethod
-    def _write_totals_row(sheet, row_index: int, leads: list[Lead]) -> None:
+    def _write_totals_row(sheet, row_index: int, leads: list[Lead], columns: list[Column]) -> None:
         """Write the merged totals row at the end of the data."""
         total = len(leads)
+        last_col = len(columns)
 
         def pct(part: int) -> str:
             return f"{round(part * 100 / total)}%" if total else "0%"
 
         with_email = sum(1 for lead in leads if lead.email)
         with_phone = sum(1 for lead in leads if lead.phone)
-        with_web = sum(1 for lead in leads if lead.website)
 
-        summary = (
-            f"Total: {total} leads  |  Con email: {with_email} ({pct(with_email)})  |  "
-            f"Con teléfono: {with_phone} ({pct(with_phone)})  |  Con web: {with_web} ({pct(with_web)})"
-        )
+        if any(header == "DNI" for header, _, _ in columns):
+            with_dni = sum(1 for lead in leads if (lead.raw_data or {}).get("dni"))
+            with_cuit = sum(1 for lead in leads if (lead.raw_data or {}).get("cuit"))
+            summary = (
+                f"Total: {total} leads  |  Con DNI: {with_dni} ({pct(with_dni)})  |  "
+                f"Con CUIT: {with_cuit} ({pct(with_cuit)})  |  "
+                f"Con email: {with_email} ({pct(with_email)})  |  "
+                f"Con teléfono: {with_phone} ({pct(with_phone)})"
+            )
+        else:
+            with_web = sum(1 for lead in leads if lead.website)
+            summary = (
+                f"Total: {total} leads  |  Con email: {with_email} ({pct(with_email)})  |  "
+                f"Con teléfono: {with_phone} ({pct(with_phone)})  |  Con web: {with_web} ({pct(with_web)})"
+            )
 
         sheet.merge_cells(
-            start_row=row_index, start_column=1, end_row=row_index, end_column=len(COLUMNS)
+            start_row=row_index, start_column=1, end_row=row_index, end_column=last_col
         )
         cell = sheet.cell(row=row_index, column=1, value=summary)
         cell.fill = HEADER_FILL
         cell.font = TOTALS_FONT
         cell.alignment = Alignment(horizontal="left", vertical="center")
-        for col_index in range(2, len(COLUMNS) + 1):
+        for col_index in range(2, last_col + 1):
             sheet.cell(row=row_index, column=col_index).fill = HEADER_FILL
 
     @staticmethod
-    def _apply_outer_border(sheet, last_row: int) -> None:
+    def _apply_outer_border(sheet, last_row: int, last_col: int) -> None:
         """Draw a solid grey border around the full used range, no inner borders."""
-        last_col = len(COLUMNS)
         for row in range(1, last_row + 1):
             for col in (1, last_col):
                 cell = sheet.cell(row=row, column=col)

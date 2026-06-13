@@ -48,6 +48,8 @@ class Settings:
     # Dateas search mode. Defaults keep them harmless when unset.
     LOCATION: str = ""
     DATEAS_TYPE: str = "empresas"
+    DATEAS_LOOKUP: str = "name"
+    ML_OFFICIAL_ONLY: bool = False
 
 
 settings = Settings()

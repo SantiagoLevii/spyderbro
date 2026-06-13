@@ -7,7 +7,7 @@ from scrapling import StealthyFetcher
 
 from config.settings import settings
 from models.lead import Lead
-from scrapers.guia_oleo import split_query
+from scrapers.query_utils import split_query
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 

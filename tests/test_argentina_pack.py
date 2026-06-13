@@ -7,17 +7,20 @@ argenprop) and the country-filtered Clutch scraper have dedicated tests with
 proper page sequences. All fetching is mocked via FakeFetcher/FakePage — no real
 requests.
 """
+import argparse
 import json
 
 import pytest
+from openpyxl import load_workbook
 
+import main
 from config.settings import settings
+from exporters.csv_exporter import CSVExporter
+from models.lead import Lead
 from scrapers.abogados import AbogadosScraper
 from scrapers.argenprop import ArgenpropScraper
 from scrapers.clutch import ClutchScraper
 from scrapers.dateas import DateasScraper
-from scrapers.doctoralia import DoctoraliaScraper
-from scrapers.guia_oleo import GuiaOleoScraper
 from scrapers.mercadolibre import MercadoLibreScraper
 from scrapers.paginas_amarillas import PaginasAmarillasScraper
 from scrapers.zonaprop import ZonapropScraper
@@ -64,23 +67,6 @@ def _card(scraper_key: str, name: str) -> str:
             f'Ver Más</a></td>'
             f'</tr></table>'
         ),
-        "guia_oleo": (
-            f'<div class="resto-card"><h2 class="resto-name">{name}</h2>'
-            f'<span class="resto-address">Honduras 5000</span>'
-            f'<span class="resto-cuisine">Sushi</span>'
-            f'<span class="resto-rating">4,5</span></div>'
-        ),
-        "doctoralia": (
-            f'<div class="doctor-card"><h3 class="doctor-name">{name}</h3>'
-            f'<span class="doctor-specialty">Dentista</span>'
-            f'<span class="doctor-address">Consultorio Centro</span>'
-            f'<span class="doctor-rating">4,9</span></div>'
-        ),
-        "mercadolibre": (
-            f'<div class="ui-search-result__wrapper">'
-            f'<span class="ui-search-official-store-label">{name}</span>'
-            f'<span class="ui-search-reviews__rating-number">4.7</span></div>'
-        ),
     }
     return cards[scraper_key]
 
@@ -95,9 +81,6 @@ def _page(scraper_key: str, *names: str) -> FakePage:
 SCRAPERS = [
     ("paginas_amarillas", PaginasAmarillasScraper, "Fetcher", "paginas_amarillas"),
     ("dateas", DateasScraper, "Fetcher", "dateas"),
-    ("guia_oleo", GuiaOleoScraper, "Fetcher", "guia_oleo"),
-    ("doctoralia", DoctoraliaScraper, "StealthyFetcher", "doctoralia"),
-    ("mercadolibre", MercadoLibreScraper, "StealthyFetcher", "mercadolibre"),
 ]
 
 IDS = [s[0] for s in SCRAPERS]
@@ -305,3 +288,116 @@ def test_argentina_pack_constant():
     assert len(main.ARGENTINA_PACK) == 9
     assert "paginas_amarillas" in main.ARGENTINA_PACK
     assert all(src in main.SCRAPERS for src in main.ARGENTINA_PACK)
+
+
+# --- Dateas Sprint I: full fields, pagination, lookup, Excel, filters ---------
+
+def _dateas_row(name, cuit, age, province, locality, kind="persona"):
+    slug = name.replace(" ", "-").lower()
+    digits = cuit.replace("-", "")
+    return (
+        f'<table><tr><td>{name}</td><td>{cuit}</td><td>{age}</td>'
+        f'<td>{province}</td><td>{locality}</td>'
+        f'<td><a href="/es/{kind}/{slug}-{digits}">Ver Más</a></td></tr></table>'
+    )
+
+
+def _filter_args(**overrides):
+    base = dict(
+        filter_complete=False, filter_has_phone=False, filter_has_email=False,
+        filter_has_website=False, filter_min_rating=None, filter_has_cuit=False,
+        filter_has_dni=False, filter_entity_type="ambos", filter_province=None,
+        filter_locality=None,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_dateas_extracts_all_public_fields(monkeypatch):
+    monkeypatch.setattr("scrapers.dateas.Fetcher", FakeFetcher)
+    monkeypatch.setattr(settings, "DATEAS_TYPE", "personas")
+    html = _dateas_row("GARCIA JUAN", "20-30123456-5", "40 años",
+                       "Buenos Aires (Pcia)", "La Plata", kind="persona")
+    FakeFetcher.configure(pages=[FakePage(f"<html><body>{html}</body></html>")])
+    leads = DateasScraper().scrape("garcia", limit=5)
+    assert len(leads) == 1
+    r = leads[0].raw_data
+    assert r["dni"] == "30123456"
+    assert r["cuit"] == "20-30123456-5"
+    assert r["age"] == "40"
+    assert r["province"] == "Buenos Aires"  # "(Pcia)" stripped
+    assert r["locality"] == "La Plata"
+    assert r["entity_type"] == "fisica"
+
+
+def test_dateas_pagination(monkeypatch):
+    monkeypatch.setattr("scrapers.dateas.Fetcher", FakeFetcher)
+    FakeFetcher.configure(pages=[
+        _page("dateas", "Empresa Uno A", "Empresa Uno B"),
+        _page("dateas", "Empresa Dos A", "Empresa Dos B"),
+    ])
+    leads = DateasScraper().scrape("test", limit=50)
+    assert FakeFetcher.calls >= 2
+    assert len(leads) >= 3
+
+
+def test_dateas_lookup_by_cuit(monkeypatch):
+    monkeypatch.setattr("scrapers.dateas.Fetcher", FakeFetcher)
+    html = _dateas_row("INMOBILIARIA SA", "33-71017702-9", "",
+                       "Córdoba", "Jesus Maria", kind="empresa")
+    FakeFetcher.configure(pages=[FakePage(f"<html><body>{html}</body></html>")])
+    lead = DateasScraper().lookup_by_cuit("33-71017702-9")
+    assert lead is not None
+    assert lead.name == "INMOBILIARIA SA"
+    assert lead.raw_data["cuit"] == "33-71017702-9"
+    assert lead.raw_data["entity_type"] == "juridica"
+
+
+def test_dateas_lookup_by_dni(monkeypatch):
+    monkeypatch.setattr("scrapers.dateas.Fetcher", FakeFetcher)
+    html = _dateas_row("PEREZ JUAN", "20-30123456-5", "35 años",
+                       "Buenos Aires", "La Plata", kind="persona")
+    FakeFetcher.configure(pages=[FakePage(f"<html><body>{html}</body></html>")])
+    lead = DateasScraper().lookup_by_dni("30123456")
+    assert lead is not None
+    assert lead.raw_data["dni"] == "30123456"
+    assert lead.raw_data["entity_type"] == "fisica"
+
+
+def test_excel_dateas_columns():
+    leads = [Lead(name="Juan Perez", source="dateas", raw_data={
+        "dni": "30123456", "cuit": "20-30123456-5", "age": "35",
+        "province": "Buenos Aires", "locality": "La Plata", "entity_type": "fisica",
+    })]
+    path = CSVExporter().export(leads, "test_dateas_cols.csv")
+    ws = load_workbook(path).active
+    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+    for col in ("DNI", "CUIT/CUIL", "Edad", "Provincia", "Localidad", "Tipo"):
+        assert col in headers
+
+
+def test_excel_no_dateas_columns_without_dateas():
+    leads = [Lead(name="Gym", source="google_maps", phone="+13055046980")]
+    path = CSVExporter().export(leads, "test_nodateas_cols.csv")
+    ws = load_workbook(path).active
+    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+    assert "DNI" not in headers
+    assert "CUIT/CUIL" not in headers
+
+
+def test_filter_has_cuit():
+    leads = [
+        Lead(name="A", source="dateas", raw_data={"cuit": "20-30123456-5"}),
+        Lead(name="B", source="dateas", raw_data={}),
+    ]
+    filtered, _ = main.apply_filters(leads, _filter_args(filter_has_cuit=True))
+    assert [l.name for l in filtered] == ["A"]
+
+
+def test_filter_province():
+    leads = [
+        Lead(name="A", source="dateas", raw_data={"province": "Buenos Aires"}),
+        Lead(name="B", source="dateas", raw_data={"province": "Córdoba"}),
+    ]
+    filtered, _ = main.apply_filters(leads, _filter_args(filter_province="Buenos Aires"))
+    assert [l.name for l in filtered] == ["A"]

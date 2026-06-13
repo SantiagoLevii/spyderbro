@@ -7,7 +7,7 @@ from scrapling import Fetcher
 
 from config.settings import settings
 from models.lead import Lead
-from scrapers.guia_oleo import split_query
+from scrapers.query_utils import split_query
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 from utils.validators import is_valid_email, normalize_phone

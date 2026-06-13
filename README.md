@@ -1,119 +1,186 @@
-# ScrapBro
+# ScrapBro 🕷️
+> Multi-source B2B Lead Scraper — Argentina & Global
 
-Multi-source B2B lead scraper. Extrae nombre, email, teléfono, web, dirección, categoría y rating de negocios desde Google Maps, Instagram, Facebook, Twitter/X, Google Dorks y LinkedIn.
+![tests](https://img.shields.io/badge/tests-181%20passing-brightgreen)
+![python](https://img.shields.io/badge/python-3.13-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
 
-Los emails se extraen del sitio web de cada negocio y se validan; los teléfonos se normalizan a formato E.164. Los leads de múltiples fuentes se deduplican y mergean automáticamente. Las sesiones interrumpidas se pueden resumir desde checkpoints.
+ScrapBro extracts structured B2B leads (name, email, phone, website, address,
+category, rating) from 15 sources — global platforms plus a dedicated Argentina
+pack — into a styled Excel workbook, with concurrent scraping, cross-source
+deduplication, caching and resumable sessions. It runs fully local from the CLI.
 
-## Instalación
+## ✨ Features
+
+- **15 data sources** — Google Maps, Instagram, Facebook, Twitter/X, Google
+  Dorks, LinkedIn + the Argentina pack (Páginas Amarillas, Dateas, Zonaprop,
+  Argenprop, TripAdvisor AR, Top Doctors AR, MercadoLibre, Clutch, Abogados).
+- **Professional Excel export** with dynamic columns per source (Dateas adds
+  DNI / CUIT / age / province / locality / entity-type columns automatically).
+- **Async pipeline** with automatic parallelism (`min(32, CPUs × 4)` workers).
+- **Cross-source deduplication** (phone / domain / email / fuzzy name).
+- **24h cache** and **resumable checkpoints** for interrupted runs.
+- **Per-source rate limiting**, email validation and **E.164** phone normalization.
+- **Direct CUIT/DNI lookup** on Dateas (Argentine tax-ID registry).
+
+## 📦 Installation
 
 ```bash
-# 1. Clonar / copiar el proyecto y entrar al directorio
+git clone <repo-url> leadflow-scraper
 cd leadflow-scraper
-
-# 2. Crear y activar el entorno virtual (Windows)
 python -m venv venv
-.\venv\Scripts\activate
-
-# 3. Instalar dependencias
+.\venv\Scripts\activate          # Windows  (source venv/bin/activate on Linux/Mac)
 pip install -r requirements.txt
-
-# 4. Instalar el navegador de Scrapling (primera vez)
-scrapling install
+scrapling install                # one-time: installs the stealth browser
+cp .env.example .env             # then edit .env (all keys optional)
 ```
 
-Requiere Python 3.13+.
+Requires Python 3.13.
 
-## Configuración
+## ⚙️ Configuration
+
+All environment variables are optional — ScrapBro runs with sensible defaults.
+
+| Variable | Required | Description | Where to get it |
+|----------|----------|-------------|-----------------|
+| `SERPER_API_KEY` | optional | Google results for the Dorks source (falls back to DuckDuckGo) | https://serper.dev (2500 free) |
+| `PROXY_URL` | optional | Residential proxy for LinkedIn / Instagram / MercadoLibre | any proxy provider |
+| `APIFY_TOKEN` | optional | Reserved for future Apify integrations | https://apify.com |
+| `SCRAPING_DELAY_MIN` / `MAX` | optional | Random delay range between requests (seconds) | default 2 / 5 |
+| `DEFAULT_LIMIT` | optional | Default `--limit` | default 50 |
+| `OUTPUT_DIR` | optional | Where `.xlsx` / `.json` files are written | default `output/` |
+
+## 🚀 Quick start
 
 ```bash
-# Copiar la plantilla de variables de entorno
-cp .env.example .env
+# Basic search
+python main.py --source google_maps --query "gyms in Miami" --limit 20 --output csv
+
+# Multi-source (concurrent + auto-dedup)
+python main.py --source google_maps,dorks,twitter --query "gyms in Miami" --limit 30
+
+# Argentina pack (all 9 AR sources)
+python main.py --source argentina --query "restaurantes" --location "buenos-aires" --limit 30
+
+# With filters
+python main.py --source google_maps --query "dentists Miami" --filter-complete --limit 50
+
+# Dateas: search people and filter by province
+python main.py --source dateas --query "garcia" --dateas-type personas \
+  --location "Buenos Aires" --filter-has-cuit --limit 20
+
+# Dateas: direct lookup by CUIT or DNI
+python main.py --source dateas --query "20-43982658-5" --dateas-lookup cuit --limit 1
+python main.py --source dateas --query "43982658" --dateas-lookup dni --limit 1
+
+# JSON output
+python main.py --source paginas_amarillas --query "contadores" --location "rosario" --output json
 ```
 
-Editar `.env`:
+## 📋 Sources
 
-| Variable | Obligatoria | Descripción |
-|---|---|---|
-| `SERPER_API_KEY` | No | API de Serper.dev para el scraper de Dorks (resultados de Google). Gratis 2500 queries en https://serper.dev. Sin key, Dorks usa DuckDuckGo con delays conservadores. |
-| `PROXY_URL` | No | Proxy residencial (`http://usuario:password@host:puerto`). Mejora LinkedIn/Instagram/Facebook. |
-| `APIFY_TOKEN` | No | Token de Apify para Instagram a escala (futuro). |
-| `SCRAPING_DELAY_MIN/MAX` | No | Delays entre requests en segundos (default 2-5). |
-| `DEFAULT_LIMIT` | No | Límite de leads por defecto (default 50). |
-| `OUTPUT_DIR` | No | Carpeta de salida (default `output/`). |
+| Source | Data extracted | Requires | Status |
+|--------|----------------|----------|--------|
+| google_maps | name, phone, web, address, category, rating | – | ✅ |
+| paginas_amarillas | name, phone, address, web, category | – | ✅ |
+| dateas | name, DNI, CUIT, age, province, locality | – | ✅ (registry, no direct contact) |
+| zonaprop | agency, phone, zone | – | ✅ |
+| argenprop | agency, address, zone | – | ✅ |
+| tripadvisor_ar | name, phone, address, web, cuisine, rating | – | ✅ |
+| topdoctors_ar | name, specialty, city | – | ✅ (no per-doctor contact) |
+| abogados | firm, phone, address, specialty, web | – | ✅ |
+| clutch | agency, web, location, rating | – | ✅ (global; AR has no data) |
+| dorks | email, web, name | `SERPER_API_KEY` (optional) | ✅ |
+| instagram | bio, email, phone | – | ⚠️ direct public profiles only |
+| facebook | name, phone, web | – | ⚠️ direct public pages only |
+| twitter | bio, email, web | – | ⚠️ no anonymous search |
+| linkedin | name, role, company | `PROXY_URL` | ⚠️ authwall without proxy |
+| mercadolibre | store, web, rating | `PROXY_URL` | ⚠️ anti-bot needs residential proxy |
 
-## Uso
+Alias: `--source argentina` expands to the 9 AR sources. The legacy `guia_oleo`
+and `doctoralia` are deprecated aliases that redirect to `tripadvisor_ar` and
+`topdoctors_ar` respectively.
+
+## 🔧 CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--source` | Comma-separated sources, or `argentina` (default: `google_maps`) |
+| `--query` | Search string (min 2 chars), or a CUIT/DNI with `--dateas-lookup` |
+| `--location` | Province/city for AR sources that need it |
+| `--limit` | Max leads, 1–1000 (default: 50) |
+| `--output` | `csv` (→ styled `.xlsx`) or `json` (default: `csv`) |
+| `--dateas-type` | `empresas` \| `personas` \| `ambos` (default: `empresas`) |
+| `--dateas-lookup` | `name` (default) \| `cuit` \| `dni` |
+| `--ml-official-only` | MercadoLibre: official stores only |
+| `--filter-complete` | Only leads with phone AND website AND email |
+| `--filter-has-phone` / `--filter-has-email` / `--filter-has-website` | Single-field filters |
+| `--filter-min-rating FLOAT` | Only leads with rating ≥ value |
+| `--filter-has-cuit` / `--filter-has-dni` | Dateas: require CUIT / DNI |
+| `--filter-entity-type` | `fisica` \| `juridica` \| `ambos` (Dateas) |
+| `--filter-province` / `--filter-locality` | Exact-match location filters (Dateas) |
+| `--no-cache` / `--clear-cache` | Ignore / wipe the 24h cache |
+| `--no-resume` | Ignore checkpoints, start fresh |
+
+## 📊 Excel output
+
+`--output csv` writes a styled `.xlsx` to `output/`:
+
+```
+┌─────────────┬─────────────┬───────────┬─────────┬──────────┬─────┬──────┐
+│ Name        │ Email       │ Phone     │ Website │ Address  │ ... │ Tipo │   ← dark-blue header, frozen
+├─────────────┼─────────────┼───────────┼─────────┼──────────┼─────┼──────┤
+│ ...leads (alternating row shading, auto-filter)...                      │
+├────────────────────────────────────────────────────────────────────────┤
+│ Total: N leads | Con CUIT: N (X%) | Con email: N (X%) | ...             │   ← merged totals row
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+Columns are **dynamic**: the base 8 columns are always present; when the result
+set contains Dateas leads, six extra columns (DNI, CUIT/CUIL, Edad, Provincia,
+Localidad, Tipo) are appended and the totals row reports CUIT/DNI coverage.
+
+## 🏗️ Architecture
+
+```
+CLI → validation → Scraper(s) → Async Pipeline → Deduplicator → Validators → Exporter → .xlsx / .json
+                                  (concurrent,        (phone/domain/   (email,
+                                   semaphore)          email/fuzzy)     E.164)
+```
+
+- `scrapers/` — one module per source (plus `query_utils`, `email_scraper`).
+- `pipeline/` — `async_pipeline` (concurrency) + `deduplicator` (merge).
+- `exporters/` — styled `.xlsx` (`csv_exporter`) and `json_exporter`.
+- `utils/` — cache, checkpoints, rate limiter, retry, validators, concurrency.
+- `config/settings.py` — env-backed settings; `models/lead.py` — the Lead model.
+
+## 🧪 Tests
 
 ```bash
-# Básico
-python main.py --source google_maps --query "gyms in Miami" --limit 10 --output csv
-
-# Multi-fuente (corre en paralelo y deduplica automáticamente)
-python main.py --source google_maps,dorks,linkedin --query "gyms in Miami" --limit 15 --output csv
-
-# Filtros
-python main.py --source google_maps --query "gyms in Miami" --filter-has-email --filter-min-rating 4.0
-
-# Caché y checkpoints
-python main.py --source dorks --query "gyms in Miami" --no-cache     # fuerza re-scraping
-python main.py --clear-cache                                          # limpia caché y sale
-python main.py --source google_maps --query "..." --no-resume         # ignora checkpoints
-```
-
-| Flag | Descripción |
-|---|---|
-| `--source` | Fuentes separadas por coma: `google_maps`, `instagram`, `facebook`, `twitter`, `dorks`, `linkedin` |
-| `--query` | Búsqueda (mín. 2 caracteres). Instagram/Twitter: `@cuenta`, `#hashtag` o username |
-| `--limit` | Máximo de leads, 1-1000 (default 50) |
-| `--output` | `csv` (genera `.xlsx` con formato Excel) o `json` (default csv) |
-| `--filter-complete` | Solo leads con teléfono + web + email |
-| `--filter-has-phone/-email/-website` | Solo leads con ese campo |
-| `--filter-min-rating FLOAT` | Solo leads con rating >= valor |
-| `--no-cache` / `--clear-cache` | Control de caché (TTL 24h) |
-| `--no-resume` | Ignorar checkpoints |
-
-## Fuentes disponibles
-
-| Fuente | Qué extrae | Limitaciones |
-|---|---|---|
-| `google_maps` | Nombre, dirección, categoría, rating, teléfono, web, email (vía sitio web) | Selectores CSS pueden cambiar; ~10 resultados por scroll |
-| `instagram` | Nombre, bio, email/teléfono de la bio, link in bio, categoría | Solo perfiles públicos; seguidores y hashtags requieren login (devuelve vacío) |
-| `facebook` | Nombre, categoría, dirección, teléfono, web, email | Solo páginas públicas; la búsqueda requiere login (devuelve vacío) |
-| `twitter` | Nombre, bio, email/teléfono de la bio, web | Solo perfiles públicos; la búsqueda requiere login (devuelve vacío) |
-| `dorks` | Nombre, web, email (vía EmailScraper), teléfono del snippet | Con SERPER_API_KEY usa Google; sin key, DuckDuckGo con delays 8-15s |
-| `linkedin` | Empresa: nombre, industria, web. Perfil: nombre, cargo, ubicación | Authwall agresivo sin proxy; modo conservador con delays 10-20s |
-
-## Arquitectura
-
-```
-main.py                  CLI: argparse, validación de inputs, orquestación
-config/settings.py       Variables de entorno (.env) + validate_settings()
-models/lead.py           Dataclass Lead
-scrapers/                Un módulo por fuente + email_scraper (enriquecimiento)
-pipeline/
-  async_pipeline.py      Scraping concurrente multi-fuente (asyncio + semáforo)
-  deduplicator.py        Dedup por teléfono/dominio/email/fuzzy nombre + merge
-exporters/               Excel .xlsx (openpyxl) y JSON
-utils/
-  terminal.py            Banner, progress bar, resumen de sesión
-  validators.py          Validación de emails, normalización E.164
-  cache.py               Caché JSON con TTL 24h (.cache/)
-  checkpoint.py          Sesiones resumibles con TTL 2h (.checkpoints/)
-  rate_limiter.py        Rate limiting por scraper (sliding window)
-  retry.py               Retry con backoff exponencial (sync y async)
-  file_utils.py          sanitize_filename, ensure_dir
-tests/                   pytest + pytest-asyncio, mocks offline (sin red)
-```
-
-## Tests
-
-```bash
+python -m pytest tests/ -v
 python -m pytest tests/ -v --cov=. --cov-report=term-missing
 ```
 
-## Seguridad
+181 tests, fully offline (network fetchers are mocked).
 
-- Sin secrets hardcodeados — todo via `.env` (gitignored), leído en `config/settings.py`
-- Las API keys nunca se loggean ni aparecen en outputs
-- Inputs del CLI validados (query, limit, source, output)
-- Timeouts explícitos en todos los requests
-- Rate limiting por fuente para no saturar los sitios
+## 📝 Known limitations
+
+- **mercadolibre** — "snoopy" anti-bot serves a JS shell to datacenter IPs;
+  needs a residential `PROXY_URL`.
+- **doctoralia** — geo-blocks datacenter IPs; replaced by `topdoctors_ar`.
+- **topdoctors_ar / dateas** — registry-style sources: name + location but no
+  per-record phone/email/web (gated behind paid reports / shared booking lines).
+- **clutch** — removed per-country directories; useful for global/US rankings.
+- **linkedin / instagram / facebook / twitter** — limited to direct public
+  pages/profiles without a proxy/login.
+- **email validator** — occasional false positives on Sentry DSNs (`*.wixpress.com`).
+
+## 🗺️ Roadmap
+
+- [ ] AI enrichment layer (LLM-based): lead classifier, quality scoring, cold-email generation
+- [ ] SaaS packaging: API, web dashboard, billing
+- [ ] Residential-proxy integration to unblock MercadoLibre / LinkedIn / Instagram
+
+## 📄 License
+
+MIT

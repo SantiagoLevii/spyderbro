@@ -7,28 +7,36 @@ from scrapling import StealthyFetcher
 
 from config.settings import settings
 from models.lead import Lead
+from scrapers.email_scraper import EmailScraper
 from utils.rate_limiter import RateLimiter
-from utils.retry import sync_retry
 from utils.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 
-REQUESTS_PER_MINUTE = 15
-MAX_PAGES = 20
+REQUESTS_PER_MINUTE = 10
+TIMEOUT_MS = 25000
+MAX_PAGES = 5
 RESULTS_PER_PAGE = 50
-TIMEOUT_MS = 60000
 SOURCE = "mercadolibre"
 
 # Markers of MercadoLibre's "snoopy" anti-bot micro-landing shell, served with
-# HTTP 200 in place of the real listing when automation is detected.
-_ANTIBOT_MARKERS = ("micro-landing-container", "snoopy-script")
+# HTTP 200 in place of the real page when automation is detected. Confirmed to
+# block StealthyFetcher from datacenter IPs — a residential PROXY_URL is needed.
+_ANTIBOT_MARKERS = ("micro-landing-container", "snoopy-script", "requires javascript")
 
 
 class MercadoLibreScraper:
-    """Scrapes sellers (official stores / high-volume) from MercadoLibre Argentina.
+    """Scrapes sellers (stores) from MercadoLibre Argentina via public HTML.
 
-    The lead is the seller/store, not the product. Leads are deduplicated by
-    store name before returning.
+    The official API now requires OAuth2, so this scrapes the public site with
+    ``StealthyFetcher``: a category listing yields seller nicknames, and each
+    ``/perfil/{nickname}`` page yields the store's name, website and reputation.
+    Sellers are deduplicated by nickname; if a seller exposes a website, emails
+    are enriched via :class:`EmailScraper`.
+
+    Note: MercadoLibre's "snoopy" anti-bot serves a JS shell to detected
+    automation; from blocked IPs this returns an empty list with a clear warning.
+    Set ``PROXY_URL`` to a residential proxy to receive the real pages.
     """
 
     BASE_URL = "https://www.mercadolibre.com.ar"
@@ -36,74 +44,159 @@ class MercadoLibreScraper:
 
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        self.email_scraper = EmailScraper()
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
-        """CLI/pipeline entry point. Query is the product category."""
-        return self.search_sellers(query, limit)
+        """CLI/pipeline entry point. Query is the product category.
 
-    def search_sellers(self, category: str, limit: int) -> list[Lead]:
-        """Extract official-store sellers from MercadoLibre.
+        Whether to restrict to official stores is read from
+        ``settings.ML_OFFICIAL_ONLY`` (set by the ``--ml-official-only`` flag).
+        """
+        official_only = bool(getattr(settings, "ML_OFFICIAL_ONLY", False))
+        return self.search_sellers(query, official_only, limit)
 
-        The lead is the seller/store, not the product.
+    def search_sellers(
+        self, category: str, official_stores_only: bool, limit: int
+    ) -> list[Lead]:
+        """Extract unique sellers from MercadoLibre listings by category.
 
         Args:
             category: Product category (e.g. "electronica", "ropa", "hogar").
+            official_stores_only: If True, restrict to official stores
+                (``_Tienda_oficial`` listing).
             limit: Maximum number of unique-seller leads.
 
         Returns:
-            List of unique Leads — one per seller.
+            List of unique Leads — one per seller/store.
         """
+        cat = quote(category.strip().replace(" ", "-"))
         leads: list[Lead] = []
         seen: set[str] = set()
-        cat = quote(category.strip().replace(" ", "-"))
 
-        for page_num in range(1, MAX_PAGES + 1):
+        for page_num in range(MAX_PAGES):
             if len(leads) >= limit:
                 break
             url = f"{self.LISTADO_URL}/{cat}"
-            if page_num > 1:
-                offset = (page_num - 1) * RESULTS_PER_PAGE + 1
+            if official_stores_only:
+                url += "_Tienda_oficial"
+            if page_num > 0:
+                offset = page_num * RESULTS_PER_PAGE + 1
                 url += f"_Desde_{offset}"
 
-            page = self._fetch(url)
-            if page is None:
+            listing = self._fetch(url)
+            if listing is None:
+                break
+
+            nicknames = self._collect_seller_nicknames(listing)
+            if not nicknames:
+                logger.info("No seller links on listing page %d for %r", page_num + 1, category)
                 break
 
             added = 0
-            for lead in self._parse_sellers(page, category):
-                key = lead.name.lower()
-                if not key or key in seen:
-                    continue
-                seen.add(key)
-                leads.append(lead)
-                added += 1
+            for nick in nicknames:
                 if len(leads) >= limit:
                     break
+                if nick in seen:
+                    continue
+                seen.add(nick)
+                lead = self.scrape_seller_profile(nick, category)
+                if lead is None:
+                    continue
+                leads.append(lead)
+                added += 1
+                self._random_delay()
             if added == 0:
-                logger.info("No new sellers on page %d for %r — stopping", page_num, category)
+                logger.info("No new sellers on page %d for %r — stopping", page_num + 1, category)
                 break
-            self._random_delay()
 
         logger.info("MercadoLibre scrape complete: %d unique sellers", len(leads))
         return leads[:limit]
 
-    def _fetch(self, url: str):
-        """Fetch a URL with StealthyFetcher, returning None on any failure.
+    def scrape_seller_profile(self, nickname: str, category: str = "") -> Lead | None:
+        """Extract a seller's public profile from MercadoLibre.
 
-        MercadoLibre's "snoopy" anti-bot serves a tiny micro-landing shell (HTTP
-        200) instead of the listing when it detects automation; that case is
-        logged explicitly. Set ``PROXY_URL`` to a residential proxy to improve
-        the odds of receiving the real page.
+        Args:
+            nickname: Exact seller nickname (e.g. "SAMSUNG").
+            category: Product category to label the lead with.
+
+        Returns:
+            A Lead with name, website, email, rating, category, or None.
         """
-        kwargs = dict(headless=True, solve_cloudflare=True, timeout=TIMEOUT_MS)
+        url = f"{self.BASE_URL}/perfil/{nickname}"
+        page = self._fetch(url)
+        if page is None:
+            return None
+
+        name = ""
+        h1 = page.find("h1")
+        if h1:
+            name = h1.text.strip()
+        if not name:
+            title = page.css("title::text").get() or ""
+            name = title.split("|")[0].strip()
+        if not name:
+            name = nickname
+
+        website = ""
+        for href in page.css('a[href^="http"]::attr(href)').getall():
+            low = href.lower()
+            if "mercadolibre" in low or "mercadolivre" in low or "mlstatic" in low:
+                continue
+            if any(s in low for s in ("facebook.", "instagram.", "twitter.", "x.com/")):
+                continue
+            website = href.strip()
+            break
+
+        rating = 0.0
+        rating_el = page.find('[class*="rating"]') or page.find('[itemprop="ratingValue"]')
+        if rating_el:
+            try:
+                rating = float(rating_el.text.strip().replace(",", "."))
+            except (ValueError, AttributeError):
+                rating = 0.0
+
+        email = ""
+        if website:
+            try:
+                found = self.email_scraper.extract_from_website(website)
+                if found and is_valid_email(found):
+                    email = found.lower()
+            except Exception as exc:
+                logger.warning("Email enrichment failed for %s: %s", website, exc)
+
+        return Lead(
+            name=name,
+            email=email,
+            website=website,
+            rating=rating,
+            category=category,
+            source=SOURCE,
+            raw_data={"profile_url": url, "nickname": nickname},
+        )
+
+    @classmethod
+    def _collect_seller_nicknames(cls, page) -> list[str]:
+        """Collect unique seller nicknames from ``/perfil/{nickname}`` links."""
+        nicks: list[str] = []
+        seen: set[str] = set()
+        for href in page.css('a[href*="/perfil/"]::attr(href)').getall():
+            tail = href.split("/perfil/")[-1].split("?")[0].split("#")[0].strip("/")
+            if not tail or "/" in tail:
+                continue
+            if tail in seen:
+                continue
+            seen.add(tail)
+            nicks.append(tail)
+        return nicks
+
+    def _fetch(self, url: str):
+        """Fetch a URL with StealthyFetcher; None on failure or anti-bot shell."""
+        kwargs = dict(headless=True, network_idle=True, solve_cloudflare=True, timeout=TIMEOUT_MS)
         if settings.PROXY_URL:
             kwargs["proxy"] = settings.PROXY_URL
         try:
             self.rate_limiter.acquire_sync()
-            page = sync_retry(
-                lambda: StealthyFetcher.fetch(url, **kwargs),
-                max_retries=2,
-            )
+            page = StealthyFetcher.fetch(url, **kwargs)
         except Exception as exc:
             logger.error("Failed to fetch %s: %s", url, exc, exc_info=True)
             return None
@@ -113,68 +206,14 @@ class MercadoLibreScraper:
             logger.warning("Non-200 status %s for %s", status, url)
             return None
 
-        html = page.html_content or ""
+        html = (page.html_content or "").lower()
         if any(marker in html for marker in _ANTIBOT_MARKERS):
             logger.warning(
                 "MercadoLibre anti-bot (snoopy) blocked %s — served micro-landing "
-                "shell instead of listing; set PROXY_URL to bypass", url
+                "shell instead of content; set PROXY_URL to bypass", url
             )
             return None
         return page
-
-    def _parse_sellers(self, page, category: str) -> list[Lead]:
-        """Extract sellers/stores from product result cards."""
-        cards = page.find_all(".ui-search-result__wrapper") or page.find_all(".andes-card")
-        leads: list[Lead] = []
-        for card in cards:
-            lead = self._parse_seller(card, category)
-            if lead is not None:
-                leads.append(lead)
-        return leads
-
-    @staticmethod
-    def _parse_seller(card, category: str) -> Lead | None:
-        """Parse the seller/store from a single product card."""
-        store_el = (
-            card.find(".ui-search-official-store-label")
-            or card.find(".ui-search-item__group__element--seller")
-            or card.find(".store-name")
-        )
-        name = store_el.text.strip() if store_el else ""
-        if not name:
-            return None
-        name = name.removeprefix("Por ").removeprefix("Tienda oficial de ").strip()
-        if not name:
-            return None
-
-        website = ""
-        link = card.find("a.ui-search-official-store-label") or card.find("a.store-link")
-        if link:
-            website = link.attrib.get("href", "").strip()
-
-        rating = 0.0
-        rating_el = card.find(".ui-search-reviews__rating-number") or card.find(".store-reputation")
-        if rating_el:
-            try:
-                rating = float(rating_el.text.strip().replace(",", "."))
-            except ValueError:
-                rating = 0.0
-
-        email = ""
-        mail_el = card.find('a[href^="mailto:"]')
-        if mail_el:
-            candidate = mail_el.attrib.get("href", "").removeprefix("mailto:").split("?")[0].strip()
-            if is_valid_email(candidate):
-                email = candidate.lower()
-
-        return Lead(
-            name=name,
-            email=email,
-            website=website,
-            category=category,
-            rating=rating,
-            source=SOURCE,
-        )
 
     @staticmethod
     def _random_delay() -> None:

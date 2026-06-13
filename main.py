@@ -82,6 +82,8 @@ from scrapers.instagram import InstagramScraper
 from scrapers.linkedin import LinkedInScraper
 from scrapers.mercadolibre import MercadoLibreScraper
 from scrapers.paginas_amarillas import PaginasAmarillasScraper
+from scrapers.topdoctors_ar import TopDoctorsARScraper
+from scrapers.tripadvisor_ar import TripAdvisorARScraper
 from scrapers.twitter import TwitterScraper
 from scrapers.zonaprop import ZonapropScraper
 from utils.cache import ScrapingCache
@@ -115,12 +117,16 @@ SCRAPERS = {
     "mercadolibre": MercadoLibreScraper,
     "clutch": ClutchScraper,
     "abogados": AbogadosScraper,
+    "tripadvisor_ar": TripAdvisorARScraper,
+    "topdoctors_ar": TopDoctorsARScraper,
 }
 
 # Shortcut: --source argentina expands to the full Argentina pack.
 ARGENTINA_PACK = [
-    "paginas_amarillas", "dateas", "zonaprop", "argenprop", "guia_oleo",
-    "doctoralia", "mercadolibre", "clutch", "abogados",
+    "paginas_amarillas", "dateas", "zonaprop", "argenprop",
+    "tripadvisor_ar",   # replaces discontinued guia_oleo
+    "topdoctors_ar",    # replaces geo-blocked doctoralia
+    "mercadolibre", "clutch", "abogados",
 ]
 
 EXPORTERS = {
@@ -164,6 +170,28 @@ def apply_filters(leads: list[Lead], args: argparse.Namespace) -> tuple[list[Lea
         filters.append((
             f"--filter-min-rating {args.filter_min_rating}",
             lambda l: l.rating >= args.filter_min_rating,
+        ))
+    if args.filter_has_cuit:
+        filters.append(("--filter-has-cuit", lambda l: bool((l.raw_data or {}).get("cuit"))))
+    if args.filter_has_dni:
+        filters.append(("--filter-has-dni", lambda l: bool((l.raw_data or {}).get("dni"))))
+    if args.filter_entity_type and args.filter_entity_type != "ambos":
+        et = args.filter_entity_type
+        filters.append((
+            f"--filter-entity-type {et}",
+            lambda l, et=et: (l.raw_data or {}).get("entity_type") == et,
+        ))
+    if args.filter_province:
+        prov = args.filter_province.strip().lower()
+        filters.append((
+            f"--filter-province {args.filter_province}",
+            lambda l, p=prov: (l.raw_data or {}).get("province", "").strip().lower() == p,
+        ))
+    if args.filter_locality:
+        loc = args.filter_locality.strip().lower()
+        filters.append((
+            f"--filter-locality {args.filter_locality}",
+            lambda l, lo=loc: (l.raw_data or {}).get("locality", "").strip().lower() == lo,
         ))
 
     if not filters:
@@ -316,6 +344,17 @@ def main() -> None:
         help="Dateas search mode (default: empresas). Only applies to the dateas source.",
     )
     parser.add_argument(
+        "--dateas-lookup",
+        choices=["name", "cuit", "dni"],
+        default="name",
+        help="Dateas lookup mode: name search (default), or exact cuit/dni lookup.",
+    )
+    parser.add_argument(
+        "--ml-official-only",
+        action="store_true",
+        help="MercadoLibre only: restrict to official stores (default: all sellers).",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=settings.DEFAULT_LIMIT,
@@ -355,6 +394,34 @@ def main() -> None:
         help="Keep only leads with rating >= FLOAT (e.g. --filter-min-rating 4.0)",
     )
     parser.add_argument(
+        "--filter-has-cuit",
+        action="store_true",
+        help="Keep only leads that have a CUIT/CUIL (Dateas)",
+    )
+    parser.add_argument(
+        "--filter-has-dni",
+        action="store_true",
+        help="Keep only leads that have a DNI (Dateas)",
+    )
+    parser.add_argument(
+        "--filter-entity-type",
+        choices=["fisica", "juridica", "ambos"],
+        default="ambos",
+        help="Filter Dateas leads by entity type (default: ambos)",
+    )
+    parser.add_argument(
+        "--filter-province",
+        default=None,
+        metavar="PROVINCE",
+        help='Keep only leads from this exact province (e.g. "Buenos Aires")',
+    )
+    parser.add_argument(
+        "--filter-locality",
+        default=None,
+        metavar="LOCALITY",
+        help='Keep only leads from this exact locality (e.g. "General Rodríguez")',
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         help="Ignore cached results and force re-scraping",
@@ -380,6 +447,8 @@ def main() -> None:
     # read them without changing the scraper call signature.
     settings.LOCATION = (args.location or "").strip()
     settings.DATEAS_TYPE = args.dateas_type
+    settings.DATEAS_LOOKUP = args.dateas_lookup
+    settings.ML_OFFICIAL_ONLY = args.ml_official_only
 
     cache = ScrapingCache()
 

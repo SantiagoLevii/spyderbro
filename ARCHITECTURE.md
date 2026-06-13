@@ -2,7 +2,7 @@
 
 ## What is ScrapBro
 
-ScrapBro (formerly LeadFlow) is a multi-source B2B lead scraper CLI with 15 active sources: 6 global (Google Maps, Instagram, Facebook, Twitter/X, Google Dorks, LinkedIn) plus the 9-source Argentina pack (paginas_amarillas, dateas, zonaprop, argenprop, guia_oleo, doctoralia, mercadolibre, clutch, abogados). It extracts business name, email, phone, website, address, category, and rating. Emails are scraped from each business website and validated; phones are normalized to E.164. Within a source, detail fetching and email scraping run in parallel (ThreadPoolExecutor); multi-source runs execute scrapers concurrently (asyncio) and deduplicate automatically. Results are cached for 24h, and interrupted sessions can resume from checkpoints. Output is a styled Excel `.xlsx` (via `--output csv`) or JSON. It is the foundation of a future SaaS product; for now it runs fully local via CLI.
+ScrapBro (formerly LeadFlow) is a multi-source B2B lead scraper CLI with 15 active sources: 6 global (Google Maps, Instagram, Facebook, Twitter/X, Google Dorks, LinkedIn) plus the 9-source Argentina pack (paginas_amarillas, dateas, zonaprop, argenprop, tripadvisor_ar, topdoctors_ar, mercadolibre, clutch, abogados; the legacy `guia_oleo` and `doctoralia` remain as deprecated aliases that redirect to tripadvisor_ar / topdoctors_ar). It extracts business name, email, phone, website, address, category, and rating. Emails are scraped from each business website and validated; phones are normalized to E.164. Within a source, detail fetching and email scraping run in parallel (ThreadPoolExecutor); multi-source runs execute scrapers concurrently (asyncio) and deduplicate automatically. Results are cached for 24h, and interrupted sessions can resume from checkpoints. Output is a styled Excel `.xlsx` (via `--output csv`) or JSON. It is the foundation of a future SaaS product; for now it runs fully local via CLI.
 
 ## How to run
 
@@ -37,8 +37,10 @@ python main.py --source argentina --query "inmobiliarias" --location "buenos-air
 
 # Arguments
 --source              Comma-separated. Global: google_maps | instagram | facebook | twitter | dorks | linkedin.
-                      Argentina: paginas_amarillas | dateas | zonaprop | argenprop | guia_oleo | doctoralia |
-                      mercadolibre | clutch | abogados. Alias: argentina (= all 9 AR sources). (default: google_maps)
+                      Argentina: paginas_amarillas | dateas | zonaprop | argenprop | tripadvisor_ar |
+                      topdoctors_ar | mercadolibre | clutch | abogados (legacy aliases guia_oleo→tripadvisor_ar,
+                      doctoralia→topdoctors_ar). Alias: argentina (= all 9 AR sources). (default: google_maps)
+--ml-official-only    MercadoLibre only: restrict to official stores (default: all sellers).
 --query               Search string (min 2 chars)
 --location            Province/city for AR sources that need it (paginas_amarillas, dateas, guia_oleo, ...).
                       Ignored silently by sources that don't use it.
@@ -207,18 +209,21 @@ leadflow-scraper/
 | `scrapers/dorks.py` | Done — async; Serper.dev or DuckDuckGo auto-detected; 5 dorks via asyncio.gather; EmailScraper enrichment |
 | `scrapers/linkedin.py` | Done — curl_cffi TLS impersonation, public pages; anonymous search authwall-limited |
 | `scrapers/paginas_amarillas.py` | Done — parses live Next.js `__NEXT_DATA__` JSON (returns real leads with phone+website) |
-| `scrapers/dateas.py` | **LIVE (Sprint G)** — parses the real results `<table>` (rows linking to `/es/empresa/`/`/es/persona/`): name + CUIT + province/locality. No phone/web (CUIT registry, contact paywalled). Province filtered client-side (the `provincia` query param breaks the search). |
+| `scrapers/dateas.py` | **LIVE (Sprint G/I)** — parses the real results `<table>`: name + CUIT + age + province + locality, plus DNI derived from the CUIL and entity_type from the `/es/persona/` vs `/es/empresa/` link, all in `raw_data`. Direct lookup by CUIT (`?cuit=`) and by DNI (builds candidate CUILs). Pagination + lenient client-side province filter (the `provincia` query param breaks the search). No phone/web (registry; contact paywalled). |
 | `scrapers/abogados.py` | **LIVE (Sprint G)** — PHP/jQuery directory, NOT Next.js. 2-step: specialty `/area/{slug}/{id}` → firm detail `/directorio/{slug}/{id}` (h1 name, `<address>`, `tel:`, website). 5/5 real leads in test, 100% phone+web. |
 | `scrapers/zonaprop.py` / `argenprop.py` | **LIVE (Sprint G)** — StealthyFetcher (Cloudflare). Agency name is hidden on listing cards, so 2-step: listing → per-posting detail, where the agency comes from the `/inmobiliarias/...` link (name) and zonaprop's embedded `"telephone"` JSON (phone). Dedup by name. 4/4 real leads each in test. |
 | `scrapers/clutch.py` | **Scraper LIVE, AR has no data (Sprint G)** — StealthyFetcher (Cloudflare). Parses `.provider` cards (name, website from `r.clutch.co/redirect?u=`, location, rating). Works for global/US service rankings (6/6 leads) but Clutch removed per-country directory URLs (`/argentina` → 404) and the geo param no longer filters, so `country=argentina` yields 0. |
-| `scrapers/doctoralia.py` | **BLOCKED (Sprint G)** — `doctoralia.com.ar` drops TCP connections from datacenter IPs (geo/IP block); unreachable without a residential AR proxy. Timeout raised + `PROXY_URL` support added; parser unverified. |
-| `scrapers/mercadolibre.py` | **BLOCKED (Sprint G)** — "snoopy" anti-bot serves a micro-landing shell (HTTP 200, no listing) and the public API now returns 403 (OAuth). Shell detection + `PROXY_URL` support added; returns empty with a clear warning. |
-| `scrapers/guia_oleo.py` | **DISCONTINUED SOURCE (Sprint G)** — `guiaoleo.com.ar` is no longer the AR restaurant directory; it is now an SEO content blog (WordPress) with no business listings. Scraper left as graceful-empty; needs a replacement source. |
+| `scrapers/tripadvisor_ar.py` | **LIVE (Sprint H, replaces guia_oleo)** — StealthyFetcher (Cloudflare/anti-bot), `network_idle=False`. City listing → restaurant detail; detail `FoodEstablishment` JSON-LD gives name + phone + address + cuisine + rating. Query term is a soft prioritizer (TripAdvisor cuisine codes are opaque). 5/5 real leads in test (100% phone+web), ~1m14s. Detail pages 403 intermittently → content-validated retries. |
+| `scrapers/topdoctors_ar.py` | **LIVE (Sprint H, replaces doctoralia)** — Fetcher (static). Specialty page `/{slug}/` → doctor profiles `/doctor/{slug}/` (h1 name, `[itemprop=address]` city, specialty). 5/5 distinct leads in test (e.g. `dermatologia`). Limits: the on-page phone is Top Doctors' shared booking line (kept in `raw_data`, NOT `Lead.phone`, else dedup merges all doctors); no per-doctor email/web; `dentista` has no listing on TopDoctors AR (returns 0). |
+| `scrapers/mercadolibre.py` | **REWRITTEN no-API (Sprint H), but BLOCKED from this IP** — StealthyFetcher HTML scraping (API needs OAuth since 2025). Flow: category listing → seller nicknames → `/perfil/{nick}` profile (name/website/rating) → EmailScraper enrichment; dedup by nickname; `--ml-official-only` flag. "snoopy" anti-bot serves a JS shell to this datacenter IP (even headless=False) → returns empty with a clear warning. Works behind a residential `PROXY_URL`. |
+| `scrapers/doctoralia.py` | **DEPRECATED stub (Sprint H)** — geo-blocked; delegates to `topdoctors_ar` with a warning. |
+| `scrapers/guia_oleo.py` | **DEPRECATED stub (Sprint H)** — domain discontinued; delegates to `tripadvisor_ar` with a warning. Re-exports `split_query` (now canonical in `scrapers/query_utils.py`). |
 | `pipeline/deduplicator.py` | Done — cross-source dedup + merge |
 | `pipeline/async_pipeline.py` | Done — concurrent sources with semaphore + speedup stats; registry injected from `main.SCRAPERS` |
 | `utils/cache.py` | Done — 24h TTL JSON cache |
 | `utils/checkpoint.py` | Done — resumable sessions (google_maps, dorks) |
-| Tests | 180/180 passing (`tests/test_argentina_pack.py` restructured in Sprint G: single-page scrapers in the parametrized suite, two-step scrapers — abogados/zonaprop/argenprop — and Clutch in dedicated listing→detail tests) |
+| Tests | 181/181 passing. Sprint I added 8 Dateas tests (all public fields, pagination, CUIT/DNI lookup, dynamic Excel columns present/absent, has-cuit & province filters). |
+| `exporters/csv_exporter.py` | Done — styled `.xlsx`; **dynamic columns (Sprint I)**: appends DNI/CUIT/Edad/Provincia/Localidad/Tipo when the result set has `dateas` leads, with a CUIT/DNI-aware totals row. |
 
 ## Terminal UI
 
