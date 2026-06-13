@@ -22,6 +22,9 @@ deduplication, caching and resumable sessions. It runs fully local from the CLI.
 - **24h cache** and **resumable checkpoints** for interrupted runs.
 - **Per-source rate limiting**, email validation and **E.164** phone normalization.
 - **Direct CUIT/DNI lookup** on Dateas (Argentine tax-ID registry).
+- **Interactive TUI** (`python tui.py`) — Matrix-green terminal app with an
+  animated spider intro, arrow-key menus and live progress (the argparse CLI
+  stays available for scripting).
 
 ## 📦 Installation
 
@@ -50,7 +53,20 @@ All environment variables are optional — ScrapBro runs with sensible defaults.
 | `DEFAULT_LIMIT` | optional | Default `--limit` | default 50 |
 | `OUTPUT_DIR` | optional | Where `.xlsx` / `.json` files are written | default `output/` |
 
-## 🚀 Quick start
+## 🖥️ Interactive mode (TUI)
+
+```bash
+python tui.py
+```
+
+A Matrix-green terminal app: pick a language, watch the animated spider, then
+step through source selection (arrow-key checkboxes), optional cookie setup,
+search configuration, a confirmation screen, live progress and a results
+summary — looping for new searches until you quit. Requires an interactive
+terminal; in non-interactive contexts it prints a hint to use the CLI. The CLI
+below remains the path for scripting and automation.
+
+## 🚀 Quick start (CLI)
 
 ```bash
 # Basic search

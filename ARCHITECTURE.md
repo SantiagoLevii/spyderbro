@@ -222,7 +222,8 @@ leadflow-scraper/
 | `pipeline/async_pipeline.py` | Done — concurrent sources with semaphore + speedup stats; registry injected from `main.SCRAPERS` |
 | `utils/cache.py` | Done — 24h TTL JSON cache |
 | `utils/checkpoint.py` | Done — resumable sessions (google_maps, dorks) |
-| Tests | 181/181 passing. Sprint I added 8 Dateas tests (all public fields, pagination, CUIT/DNI lookup, dynamic Excel columns present/absent, has-cuit & province filters). |
+| `tui.py` + `ui/` | **Interactive TUI (Sprint J)** — Matrix-green (`#048c04`) terminal app on top of the CLI: `ui/theme` (prompt_toolkit Style + ANSI), `ui/spider` (animated intro), `ui/banner` (typewriter), `ui/menus` (language/source/cookie/config/confirm/summary dialogs + pure helpers), `ui/progress` (threaded live status + summary). `tui.py` reuses `main.py`'s scraping orchestration and falls back to a CLI hint when there is no TTY. `main.py` CLI is unchanged. |
+| Tests | 191/191 passing. Sprint J added 10 TUI tests (language normalization, source catalog, cookie validation, config defaults, summary builder, theme, Windows compat). Sprint I added 8 Dateas tests (all public fields, pagination, CUIT/DNI lookup, dynamic Excel columns present/absent, has-cuit & province filters). |
 | `exporters/csv_exporter.py` | Done — styled `.xlsx`; **dynamic columns (Sprint I)**: appends DNI/CUIT/Edad/Provincia/Localidad/Tipo when the result set has `dateas` leads, with a CUIT/DNI-aware totals row. |
 
 ## Terminal UI
