@@ -9,6 +9,8 @@ from curl_cffi import requests as curl_requests
 
 from config.settings import settings
 from models.lead import Lead
+from utils.abort import AbortMixin
+from utils.cookies import load_cookies
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 from utils.terminal import print_linkedin_proxy_warning
@@ -29,7 +31,7 @@ PROFILE_URL_PATTERN = re.compile(r"linkedin\.com/in/([^/?#]+)")
 LINKEDIN_SUFFIX = re.compile(r"\s*\|\s*LinkedIn\s*$")
 
 
-class LinkedInScraper:
+class LinkedInScraper(AbortMixin):
     """Scraper de LinkedIn para perfiles públicos y páginas de empresa.
 
     Usa curl_cffi para TLS fingerprinting — NO usar requests ni httpx.
@@ -41,11 +43,18 @@ class LinkedInScraper:
     SEARCH_PEOPLE = "https://www.linkedin.com/search/results/people/?keywords={query}"
     TIMEOUT_SECONDS = 15
 
+    SOURCE = "linkedin"
+
     def __init__(self) -> None:
         self.proxy_url = settings.PROXY_URL
+        self.cookies = self._cookie_jar(load_cookies(self.SOURCE))
+        self.source = self.SOURCE
+        self.aborted_reason = ""
         if self.proxy_url:
             self.delay_range = PROXY_DELAY_RANGE
             self.rate_limiter = RateLimiter(PROXY_REQUESTS_PER_MINUTE)
+            # Log the proxy with its password redacted (OWASP A09).
+            logger.info("LinkedIn using proxy %s", settings.get_safe_proxy_url())
         else:
             self.delay_range = NO_PROXY_DELAY_RANGE
             self.rate_limiter = RateLimiter(NO_PROXY_REQUESTS_PER_MINUTE)
@@ -197,8 +206,12 @@ class LinkedInScraper:
             return []
 
         leads: list[Lead] = []
+        self._start_guard()
         for slug in slugs[:limit]:
+            if self._should_abort():
+                break
             lead = scrape_one(f"https://www.linkedin.com/{kind}/{slug}/")
+            self._record_fetch(lead is not None)
             if lead is not None:
                 leads.append(lead)
         return leads
@@ -255,9 +268,17 @@ class LinkedInScraper:
             url,
             impersonate="chrome",
             proxies=proxies,
+            cookies=self.cookies or None,
             timeout=self.TIMEOUT_SECONDS,
             allow_redirects=True,
         )
+
+    @staticmethod
+    def _cookie_jar(cookies: list[dict] | None) -> dict[str, str]:
+        """Flatten a Cookie-Editor cookie list into a curl_cffi name->value dict."""
+        if not cookies:
+            return {}
+        return {c["name"]: c.get("value", "") for c in cookies if c.get("name")}
 
     @staticmethod
     def _meta_content(html: str, property_name: str) -> str:

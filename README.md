@@ -1,7 +1,7 @@
 # ScrapBro 🕷️
 > Multi-source B2B Lead Scraper — Argentina & Global
 
-![tests](https://img.shields.io/badge/tests-181%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-263%20passing-brightgreen)
 ![python](https://img.shields.io/badge/python-3.13-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -23,8 +23,26 @@ deduplication, caching and resumable sessions. It runs fully local from the CLI.
 - **Per-source rate limiting**, email validation and **E.164** phone normalization.
 - **Direct CUIT/DNI lookup** on Dateas (Argentine tax-ID registry).
 - **Interactive TUI** (`python tui.py`) — Matrix-green terminal app with an
-  animated spider intro, arrow-key menus and live progress (the argparse CLI
-  stays available for scripting).
+  animated spider intro, custom prompt_toolkit menus, auto/manual cookie setup,
+  multi-query searches, a **live progress feed** (per-source bars, leads as they
+  arrive, non-blocking error notices) and an in-terminal results table.
+- **Speed controls** — website email lookup is the slowest step, so it is
+  auto-disabled for broad runs (>3 sources or limit >30), toggleable with
+  `--no-email-scraping` / the TUI Fast/Complete option; the total `--limit` is
+  distributed across sources instead of fetched per-source.
+- **Automatic cookie detection** — read your logged-in session straight from
+  Chrome/Edge/Firefox (`browser-cookie3`), paste it manually, or run
+  `scripts/get_cookies.js` in the browser console (the cookie screen shows both).
+- **Hardware-aware performance** — worker counts sized to your CPU+RAM
+  (`psutil`), image/CSS/font/ad blocking, aggressive timeouts and a TUI
+  performance screen; tuneable via `WORKERS`/`NETWORK_IDLE`/`BLOCK_RESOURCES`.
+- **Resilient pipeline** — a blocked source (repeated 403/429) fast-fails after
+  3 consecutive errors or a 2-minute budget instead of stalling the run; the live
+  screen marks it `✗ blocked` / `✗ timeout` / `~ partial` and keeps going.
+- **Never lose leads** — Ctrl+C / closing the window triggers an emergency save of
+  whatever was collected; no empty workbook is written when a run finds nothing.
+- **Filters are opt-in** — every TUI filter starts unchecked and the confirmation
+  screen warns when active filters could shrink the results.
 
 ## 📦 Installation
 
@@ -59,12 +77,33 @@ All environment variables are optional — ScrapBro runs with sensible defaults.
 python tui.py
 ```
 
-A Matrix-green terminal app: pick a language, watch the animated spider, then
-step through source selection (arrow-key checkboxes), optional cookie setup,
-search configuration, a confirmation screen, live progress and a results
-summary — looping for new searches until you quit. Requires an interactive
-terminal; in non-interactive contexts it prints a hint to use the CLI. The CLI
-below remains the path for scripting and automation.
+A Matrix-green terminal app, built on raw `prompt_toolkit` Applications so the
+theme (phosphor green on black) is enforced everywhere. Pick a language, watch
+the animated spider, then step through source selection, optional cookie setup,
+search configuration, a confirmation screen, a live progress screen and an
+in-terminal results table — looping for new searches until you quit.
+
+Controls (uniform across every menu):
+
+```
+[Space] toggle / select      [Enter] confirm / OK
+[Esc]   back to previous      [Q] quit (with confirmation)
+[A]     select all (sources)  [N] deselect all (sources)
+[↑][↓] navigate
+```
+
+- **Paste-your-cookie flow** — for sources that need a session (Instagram,
+  Facebook, LinkedIn, Twitter/X, MercadoLibre) you paste the Cookie-Editor JSON
+  directly; it is validated and saved to `.cookies/{source}.json` and loaded by
+  the scraper on its next run.
+- **Multi-query** — separate several searches with ` -- `
+  (e.g. `inmobiliaria lujan -- santiago gomez`); each runs independently, results
+  are combined and deduplicated, and the Excel gets a `Query` column.
+- **Output filename = your query** — the workbook is named after what you
+  searched (`inmobiliaria_lujan__santiago_gomez.xlsx`).
+
+Requires an interactive terminal; in non-interactive contexts it prints a hint
+to use the CLI. The CLI below remains the path for scripting and automation.
 
 ## 🚀 Quick start (CLI)
 
@@ -122,9 +161,10 @@ and `doctoralia` are deprecated aliases that redirect to `tripadvisor_ar` and
 | Flag | Description |
 |------|-------------|
 | `--source` | Comma-separated sources, or `argentina` (default: `google_maps`) |
-| `--query` | Search string (min 2 chars), or a CUIT/DNI with `--dateas-lookup` |
+| `--query` | Search string (min 2 chars), or a CUIT/DNI with `--dateas-lookup`. Split several searches with ` -- ` (run independently, merged + deduped) |
 | `--location` | Province/city for AR sources that need it |
-| `--limit` | Max leads, 1–1000 (default: 50) |
+| `--limit` | **Total** leads across all sources, 1–1000 (default: 50). With N sources it is split ~`limit/N` per source |
+| `--limit-per-source` | Leads **per source**, ignoring `--limit` (e.g. `50` with 3 sources → up to 150 total) |
 | `--output` | `csv` (→ styled `.xlsx`) or `json` (default: `csv`) |
 | `--dateas-type` | `empresas` \| `personas` \| `ambos` (default: `empresas`) |
 | `--dateas-lookup` | `name` (default) \| `cuit` \| `dni` |
@@ -135,6 +175,7 @@ and `doctoralia` are deprecated aliases that redirect to `tripadvisor_ar` and
 | `--filter-has-cuit` / `--filter-has-dni` | Dateas: require CUIT / DNI |
 | `--filter-entity-type` | `fisica` \| `juridica` \| `ambos` (Dateas) |
 | `--filter-province` / `--filter-locality` | Exact-match location filters (Dateas) |
+| `--no-email-scraping` | Skip visiting websites for emails (much faster); also auto-off for >3 sources or limit >30 |
 | `--no-cache` / `--clear-cache` | Ignore / wipe the 24h cache |
 | `--no-resume` | Ignore checkpoints, start fresh |
 
@@ -177,7 +218,7 @@ python -m pytest tests/ -v
 python -m pytest tests/ -v --cov=. --cov-report=term-missing
 ```
 
-181 tests, fully offline (network fetchers are mocked).
+263 tests, fully offline (network fetchers are mocked).
 
 ## 📝 Known limitations
 
@@ -189,7 +230,8 @@ python -m pytest tests/ -v --cov=. --cov-report=term-missing
 - **clutch** — removed per-country directories; useful for global/US rankings.
 - **linkedin / instagram / facebook / twitter** — limited to direct public
   pages/profiles without a proxy/login.
-- **email validator** — occasional false positives on Sentry DSNs (`*.wixpress.com`).
+- **email validator** — Sentry DSNs, CDN/PaaS hosts and placeholder domains are
+  rejected via a technical-domain blacklist (`utils/validators.py`).
 
 ## 🗺️ Roadmap
 

@@ -31,6 +31,21 @@ def test_invalid_emails(email):
     assert is_valid_email(email) is False
 
 
+@pytest.mark.parametrize("email", [
+    "abc123@sentry-next.wixpress.com",   # Sentry DSN false positive
+    "hash@o123.ingest.sentry.io",        # subdomain of sentry.io
+    "deadbeef@wixpress.com",
+    "x@vercel.app",
+    "y@netlify.app",
+    "z@githubusercontent.github.io",
+    "noone@placeholder.com",
+    "test@johndoe.com",
+])
+def test_technical_domains_rejected(email):
+    # Deuda 1: infra/placeholder domains must never pass as contact emails.
+    assert is_valid_email(email) is False
+
+
 @pytest.mark.parametrize("phone,country,expected", [
     ("(305) 504-6980", "US", "+13055046980"),
     ("305-504-6980", "US", "+13055046980"),

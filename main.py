@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 EXTERNAL_LOGGERS = (
@@ -20,6 +21,8 @@ EXTERNAL_LOGGERS = (
 )
 
 LOG_FILE = Path("scraping.log")
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
+LOG_BACKUP_COUNT = 3            # keep at most 3 rotated files
 
 
 def silence_external_loggers() -> None:
@@ -38,13 +41,15 @@ def silence_external_loggers() -> None:
 def configure_logging() -> None:
     """Configure dual logging and silence noisy third-party loggers.
 
-    - FileHandler -> scraping.log -> DEBUG (full detail)
+    - RotatingFileHandler -> scraping.log -> DEBUG (full detail, 5MB x3 rotation)
     - StreamHandler -> terminal -> WARNING (only important problems)
 
     Must run before scraper imports so Scrapling's own handler does not
     pollute the terminal.
     """
-    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -67,7 +72,7 @@ from config.settings import settings, validate_settings
 from exporters.csv_exporter import CSVExporter
 from exporters.json_exporter import JSONExporter
 from models.lead import Lead
-from pipeline.async_pipeline import AsyncScrapingPipeline
+from pipeline.async_pipeline import AsyncScrapingPipeline, should_email_scrape
 from pipeline.deduplicator import Deduplicator
 from scrapers.abogados import AbogadosScraper
 from scrapers.argenprop import ArgenpropScraper
@@ -97,6 +102,7 @@ from utils.terminal import (
     print_error,
     print_source_start,
     print_summary,
+    print_warning,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,6 +149,39 @@ EXTENSIONS = {
 def build_filename(source: str, query: str, fmt: str) -> str:
     """Generate an output filename from source, query, and format."""
     return f"{source}_{sanitize_filename(query)[:40]}{EXTENSIONS[fmt]}"
+
+
+def parse_multi_query(raw_query: str) -> list[str]:
+    """Split a query string on ``--`` into independent, validated searches.
+
+    Each sub-query is trimmed; ones shorter than 2 characters are skipped and
+    ones longer than 200 are truncated.
+
+    Args:
+        raw_query: A single query or several joined with ``--``
+            (e.g. "inmobiliaria lujan -- santiago gomez").
+
+    Returns:
+        A list of valid queries (e.g. ["inmobiliaria lujan", "santiago gomez"]).
+
+    Raises:
+        ValueError: If no sub-query meets the 2-character minimum.
+    """
+    valid: list[str] = []
+    for q in (part.strip() for part in raw_query.split("--")):
+        if len(q) < 2:
+            if q:
+                logger.warning("Skipping too-short query: %r", q)
+            continue
+        if len(q) > 200:
+            logger.warning("Truncating too-long query: %r...", q[:50])
+            q = q[:200]
+        valid.append(q)
+
+    if not valid:
+        raise ValueError("No valid queries found. Minimum 2 characters per query.")
+
+    return valid
 
 
 def apply_filters(leads: list[Lead], args: argparse.Namespace) -> tuple[list[Lead], str]:
@@ -266,7 +305,8 @@ def validate_args(args: argparse.Namespace) -> list[str]:
 
 
 def scrape_sources(
-    sources: list[str], args: argparse.Namespace, cache: ScrapingCache
+    sources: list[str], args: argparse.Namespace, cache: ScrapingCache,
+    on_lead=None, on_source_status=None, quiet: bool = False,
 ) -> tuple[list[Lead], dict]:
     """Scrape every requested source in sequence, using the cache when fresh.
 
@@ -274,6 +314,9 @@ def scrape_sources(
         sources: Validated source names.
         args: Parsed CLI arguments.
         cache: Cache handler.
+        on_lead: Optional ``(source, lead)`` callback fired per lead (live feed).
+        on_source_status: Optional ``(source, status, target)`` callback.
+        quiet: When True, suppress terminal prints (the TUI owns the screen).
 
     Returns:
         Tuple of (combined leads, worker stats: workers_used / fetch_seconds).
@@ -282,20 +325,29 @@ def scrape_sources(
     worker_stats = {"workers_used": 0, "fetch_seconds": 0.0}
 
     for index, source in enumerate(sources, start=1):
-        print_source_start(source, index, len(sources))
+        if not quiet:
+            print_source_start(source, index, len(sources))
+        if on_source_status:
+            on_source_status(source, "working", args.limit)
 
         if not args.no_cache:
             cached = cache.get(source, args.query)
             if cached is not None:
                 age = cache.age_seconds(source, args.query) or 0
-                print_cache_notice(args.query, age)
+                if not quiet:
+                    print_cache_notice(args.query, age)
+                for lead in cached:
+                    if on_lead:
+                        on_lead(source, lead)
+                if on_source_status:
+                    on_source_status(source, "done", 0)
                 all_leads.extend(cached)
                 continue
 
         scraper = SCRAPERS[source]()
         if hasattr(scraper, "allow_resume"):
             scraper.allow_resume = not args.no_resume
-        if source == "dorks":
+        if source == "dorks" and not quiet:
             print_dorks_engine(scraper.engine)
 
         leads = scraper.scrape(query=args.query, limit=args.limit)
@@ -307,6 +359,11 @@ def scrape_sources(
             cache.set(source, args.query, leads)
         else:
             logger.warning("No leads found for query %r on source %s", args.query, source)
+        for lead in leads:
+            if on_lead:
+                on_lead(source, lead)
+        if on_source_status:
+            on_source_status(source, "done", 0)
         all_leads.extend(leads)
 
     return all_leads, worker_stats
@@ -358,7 +415,21 @@ def main() -> None:
         "--limit",
         type=int,
         default=settings.DEFAULT_LIMIT,
-        help=f"Maximum number of leads to extract (default: {settings.DEFAULT_LIMIT})",
+        help=(
+            "Total leads to scrape across all sources "
+            f"(default: {settings.DEFAULT_LIMIT}). With multiple sources this is "
+            "divided automatically (e.g. --limit 60 with 3 sources = ~20 per "
+            "source). Use --limit-per-source to get N leads from each source."
+        ),
+    )
+    parser.add_argument(
+        "--limit-per-source",
+        type=int,
+        default=0,
+        help=(
+            "Leads per source, ignoring --limit (e.g. --limit-per-source 50 with "
+            "3 sources = up to 150 total leads). 0 = use --limit (default)."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -436,6 +507,12 @@ def main() -> None:
         action="store_true",
         help="Ignore checkpoints and always start from scratch",
     )
+    parser.add_argument(
+        "--no-email-scraping",
+        action="store_true",
+        help="Skip visiting websites to find emails (much faster). Email scraping "
+        "is also auto-disabled for >3 sources or limit >30.",
+    )
 
     args = parser.parse_args()
 
@@ -459,6 +536,10 @@ def main() -> None:
 
     sources = validate_args(args)
 
+    settings.EMAIL_SCRAPING_ENABLED = should_email_scrape(sources, args.limit, args.no_email_scraping)
+    if not settings.EMAIL_SCRAPING_ENABLED:
+        logger.info("Email scraping is OFF for this run (faster, websites not visited)")
+
     print_banner()
 
     logger.info(
@@ -474,21 +555,52 @@ def main() -> None:
     stats_workers = 0
     parallel = len(sources) > 1
 
+    # Split the query on ``--`` so the CLI runs each sub-search independently
+    # (same multi-query behaviour as the TUI) and merges/dedups the results.
+    raw_query = args.query
     try:
-        if parallel:
-            if "dorks" in sources:
-                print_dorks_engine("serper" if settings.SERPER_API_KEY else "duckduckgo")
-            pipeline = AsyncScrapingPipeline(
-                registry=SCRAPERS, cache=None if args.no_cache else cache
-            )
-            leads = asyncio.run(pipeline.run(sources, args.query, args.limit))
-            duplicates_removed = pipeline.duplicates_removed
-            scraper_seconds = pipeline.scraper_seconds
-        else:
-            all_leads, worker_stats = scrape_sources(sources, args, cache)
-            leads, duplicates_removed = Deduplicator().deduplicate(all_leads)
-            scraper_seconds = worker_stats["fetch_seconds"]
-            stats_workers = worker_stats["workers_used"]
+        queries = parse_multi_query(raw_query)
+    except ValueError as exc:
+        print_error(str(exc))
+        sys.exit(2)
+    multi_query = len(queries) > 1
+
+    # --limit-per-source overrides --limit: each source fetches this many leads.
+    per_source_limit = args.limit_per_source if args.limit_per_source > 0 else 0
+
+    pipeline = None
+    if parallel:
+        if "dorks" in sources:
+            print_dorks_engine("serper" if settings.SERPER_API_KEY else "duckduckgo")
+        pipeline = AsyncScrapingPipeline(
+            registry=SCRAPERS, cache=None if args.no_cache else cache
+        )
+
+    collected: list[Lead] = []
+    duplicates_removed = 0
+    try:
+        for q_index, query in enumerate(queries, start=1):
+            if multi_query:
+                logger.info("Query %d/%d: %r", q_index, len(queries), query)
+            args.query = query
+            if parallel:
+                leads_q = asyncio.run(pipeline.run(
+                    sources, query, args.limit, limit_per_source=per_source_limit,
+                ))
+                duplicates_removed += pipeline.duplicates_removed
+                scraper_seconds += pipeline.scraper_seconds
+            else:
+                if per_source_limit:
+                    args.limit = per_source_limit
+                all_leads, worker_stats = scrape_sources(sources, args, cache)
+                leads_q, dups_q = Deduplicator().deduplicate(all_leads)
+                duplicates_removed += dups_q
+                scraper_seconds += worker_stats["fetch_seconds"]
+                stats_workers = worker_stats["workers_used"]
+            if multi_query:
+                for lead in leads_q:
+                    lead.raw_data.setdefault("query", query)
+            collected.extend(leads_q)
     except KeyboardInterrupt:
         print()
         logger.warning(
@@ -496,15 +608,27 @@ def main() -> None:
         )
         sys.exit(130)
 
+    if multi_query:
+        leads, cross_dups = Deduplicator().deduplicate(collected)
+        duplicates_removed += cross_dups
+    else:
+        leads = collected
+
     leads_merged = sum(1 for l in leads if len(l.raw_data.get("merged_from", [])) > 1)
     raw_total = len(leads) + duplicates_removed
 
     leads_before_filter = len(leads)
     leads, filter_label = apply_filters(leads, args)
 
-    filename = build_filename("_".join(sources), args.query, args.output)
+    filename = build_filename("_".join(sources), raw_query, args.output)
     exporter = EXPORTERS[args.output]()
     output_path = exporter.export(leads, filename)
+    if output_path is None:
+        # No leads survived scraping/filters — no file is written (Fix 6).
+        print_warning(
+            "No se encontraron leads (o los filtros descartaron todo). No se creó archivo."
+        )
+        output_path = "(sin archivo — 0 leads)"
 
     elapsed = time.time() - start_time
     stats = build_stats(
@@ -516,7 +640,7 @@ def main() -> None:
     if "dorks" in sources:
         stats.dorks_engine = "Serper.dev (Google)" if settings.SERPER_API_KEY else "DuckDuckGo"
     if parallel:
-        stats.parallel_scrapers = min(len(sources), 3)
+        stats.parallel_scrapers = min(len(sources), 5)
     stats.workers_used = stats_workers
     stats.cpu_count = os.cpu_count() or 1
     if elapsed > 0 and scraper_seconds > elapsed:

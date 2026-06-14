@@ -97,3 +97,56 @@ def test_valid_input_passes():
 
     args = argparse.Namespace(query="gyms in Miami", limit=10, source="google_maps,dorks")
     assert validate_args(args) == ["google_maps", "dorks"]
+
+
+# --- Cookie credential hardening (Prompt O — OWASP fixes) ---------------------
+
+def test_save_cookies_restricts_permissions(tmp_path, monkeypatch):
+    """Saved cookie files are owner-only (no group/other access on POSIX)."""
+    import os
+
+    from utils import cookie_detector
+
+    monkeypatch.setattr(cookie_detector, "COOKIE_DIR", tmp_path)
+    path = cookie_detector.save_cookies(
+        "instagram",
+        [{"name": "sessionid", "value": "abc", "domain": ".instagram.com"}],
+    )
+    assert path.exists()
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o077 == 0
+
+
+def test_get_safe_proxy_url_redacts_password(monkeypatch):
+    """PROXY_URL with a password is redacted; user and host survive."""
+    monkeypatch.setattr(settings, "PROXY_URL", "http://user:secret@host:8080")
+    safe = settings.get_safe_proxy_url()
+    assert "secret" not in safe
+    assert "***" in safe
+    assert "user" in safe and "host" in safe
+
+
+def test_get_safe_proxy_url_empty(monkeypatch):
+    """No proxy -> empty string, never an error."""
+    monkeypatch.setattr(settings, "PROXY_URL", "")
+    assert settings.get_safe_proxy_url() == ""
+
+
+def test_validate_cookie_domain_correct():
+    """Instagram cookies pass validation for the instagram source."""
+    from utils import cookie_detector
+
+    ok, _msg = cookie_detector.validate_cookie_domain(
+        "instagram", [{"name": "sessionid", "domain": ".instagram.com"}]
+    )
+    assert ok is True
+
+
+def test_validate_cookie_domain_wrong():
+    """Cookies from a different domain fail validation for instagram."""
+    from utils import cookie_detector
+
+    ok, _msg = cookie_detector.validate_cookie_domain(
+        "instagram", [{"name": "x", "domain": ".facebook.com"}]
+    )
+    assert ok is False

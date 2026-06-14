@@ -9,8 +9,9 @@ from scrapling import DynamicFetcher
 from config.settings import settings
 from models.lead import Lead
 from scrapers.email_scraper import EmailScraper
+from utils.browser_config import get_stealth_fetch_kwargs
 from utils.checkpoint import ScrapingCheckpoint
-from utils.concurrency import get_optimal_workers as _get_optimal_workers
+from utils.hardware import detect_hardware
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 from utils.terminal import ScrapeProgress, ask_resume
@@ -65,14 +66,14 @@ class GoogleMapsScraper:
 
         try:
             self.rate_limiter.acquire_sync()
+            # List page needs the dynamic feed to render before scrolling, so it
+            # waits for network idle and keeps CSS (block_resources off here).
+            list_kwargs = get_stealth_fetch_kwargs(
+                network_idle=True, block_resources=False, timeout=30000
+            )
+            list_kwargs["page_action"] = self._make_scroll_action(limit)
             page = sync_retry(
-                lambda: self.fetcher.fetch(
-                    url,
-                    headless=True,
-                    network_idle=True,
-                    timeout=30000,
-                    page_action=self._make_scroll_action(limit),
-                ),
+                lambda: self.fetcher.fetch(url, **list_kwargs),
                 max_retries=2,
             )
         except Exception as exc:
@@ -150,7 +151,7 @@ class GoogleMapsScraper:
         if not parsed:
             return leads
 
-        self.workers_used = min(_get_optimal_workers(), len(parsed))
+        self.workers_used = min(self._optimal_workers(), len(parsed))
         progress = ScrapeProgress(total=len(parsed))
         completed = 0
 
@@ -190,6 +191,13 @@ class GoogleMapsScraper:
         self._enrich_emails(leads)
         return leads[:limit]
 
+    @staticmethod
+    def _optimal_workers() -> int:
+        """Thread workers for detail fetching: settings override, else hardware."""
+        if settings.WORKERS > 0:
+            return min(settings.WORKERS, 64)
+        return detect_hardware().recommended_workers
+
     def _enrich_contact(self, detail_url: str) -> tuple[str, str]:
         """Worker task: fetch one detail page and return (phone, website).
 
@@ -208,6 +216,9 @@ class GoogleMapsScraper:
 
     def _enrich_emails(self, leads: list[Lead]) -> None:
         """Scrape emails for all lead websites in parallel and assign them."""
+        if not settings.EMAIL_SCRAPING_ENABLED:
+            logger.info("Email scraping disabled — skipping email enrichment")
+            return
         websites = [lead.website for lead in leads if lead.website and not lead.email]
         if not websites:
             return
@@ -228,13 +239,10 @@ class GoogleMapsScraper:
         """
         try:
             self.rate_limiter.acquire_sync()
+            # Detail pages: block images/CSS/fonts/ads for speed (text-only parse).
+            detail_kwargs = get_stealth_fetch_kwargs(timeout=10000)
             detail = sync_retry(
-                lambda: self.fetcher.fetch(
-                    url,
-                    headless=True,
-                    network_idle=True,
-                    timeout=30000,
-                ),
+                lambda: self.fetcher.fetch(url, **detail_kwargs),
                 max_retries=2,
             )
         except Exception as exc:

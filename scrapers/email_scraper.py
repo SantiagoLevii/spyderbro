@@ -5,7 +5,7 @@ from urllib.parse import urljoin, urlparse
 
 from scrapling import Fetcher
 
-from utils.concurrency import get_optimal_workers
+from config.settings import settings
 from utils.rate_limiter import RateLimiter
 from utils.validators import is_valid_email
 
@@ -32,11 +32,20 @@ ASSET_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".
 class EmailScraper:
     """Extracts contact emails from business websites using static fetching."""
 
-    TIMEOUT_SECONDS = 8
-    MAX_PAGES = 3
-
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        # In-session cache of domain -> email, so the same site is scanned once.
+        self._domain_cache: dict[str, str] = {}
+
+    @property
+    def TIMEOUT_SECONDS(self) -> int:
+        """Per-site fetch timeout (settings-driven, aggressive by default)."""
+        return settings.EMAIL_SCRAPING_TIMEOUT
+
+    @property
+    def MAX_PAGES(self) -> int:
+        """Maximum pages to scan per site (home, optionally contact)."""
+        return settings.EMAIL_SCRAPING_MAX_PAGES
 
     def extract_from_website(self, url: str) -> str:
         """Visit a business website and look for a contact email.
@@ -57,6 +66,18 @@ class EmailScraper:
             logger.debug("Skipping social network URL: %s", url)
             return ""
 
+        domain = urlparse(url).netloc.lower().removeprefix("www.")
+        if domain in self._domain_cache:
+            logger.debug("Domain %s already scanned this session", domain)
+            return self._domain_cache[domain]
+
+        email = self._scan_website(url)
+        if domain:
+            self._domain_cache[domain] = email
+        return email
+
+    def _scan_website(self, url: str) -> str:
+        """Fetch the homepage and contact pages of a site, returning the first email."""
         pages_visited = 0
 
         page = self._fetch(url)
@@ -101,7 +122,7 @@ class EmailScraper:
             return {}
 
         results: dict[str, str] = {}
-        workers = min(get_optimal_workers(), len(unique_urls))
+        workers = min(settings.EMAIL_SCRAPING_MAX_CONCURRENT, len(unique_urls))
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {

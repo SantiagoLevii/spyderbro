@@ -9,6 +9,8 @@ from scrapling import StealthyFetcher
 from config.settings import settings
 from models.lead import Lead
 from scrapers.query_utils import split_query
+from utils.abort import AbortMixin
+from utils.browser_config import get_stealth_fetch_kwargs
 from utils.rate_limiter import RateLimiter
 from utils.validators import normalize_phone
 
@@ -37,7 +39,7 @@ _DEFAULT_GEO = "g312741"
 _GEO_SLUG = "Buenos_Aires_Capital_Federal_District"
 
 
-class TripAdvisorARScraper:
+class TripAdvisorARScraper(AbortMixin):
     """Scrapes restaurants from TripAdvisor Argentina.
 
     TripAdvisor is behind Cloudflare/anti-bot, so pages are fetched with
@@ -51,6 +53,8 @@ class TripAdvisorARScraper:
 
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        self.source = SOURCE
+        self.aborted_reason = ""
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
         """CLI/pipeline entry point. Query is '<cuisine> <location>'."""
@@ -73,13 +77,15 @@ class TripAdvisorARScraper:
 
         detail_urls: list[str] = []
         seen_urls: set[str] = set()
+        self._start_guard()
         for page_num in range(MAX_PAGES):
-            if len(detail_urls) >= limit:
+            if len(detail_urls) >= limit or self._should_abort():
                 break
             listing = self._fetch(
                 self._listing_url(geo, page_num),
                 validator=lambda p: bool(p.css('a[href*="Restaurant_Review"]::attr(href)').getall()),
             )
+            self._record_fetch(listing is not None)
             if listing is None:
                 break
             found = self._collect_restaurant_urls(listing, term)
@@ -95,9 +101,10 @@ class TripAdvisorARScraper:
         leads: list[Lead] = []
         seen_names: set[str] = set()
         for url in detail_urls:
-            if len(leads) >= limit:
+            if len(leads) >= limit or self._should_abort():
                 break
             lead = self.scrape_restaurant_detail(url)
+            self._record_fetch(lead is not None)
             if lead is None or not lead.name:
                 continue
             key = lead.name.lower()
@@ -246,9 +253,11 @@ class TripAdvisorARScraper:
         # network_idle=False: the data we need (review links, FoodEstablishment
         # JSON-LD) is server-rendered in the initial HTML, so waiting for network
         # idle on these heavy pages only adds latency and bot-detection surface.
-        kwargs = dict(headless=True, network_idle=False, solve_cloudflare=True, timeout=TIMEOUT_MS)
+        kwargs = get_stealth_fetch_kwargs(timeout=TIMEOUT_MS, solve_cloudflare=True)
         if settings.PROXY_URL:
             kwargs["proxy"] = settings.PROXY_URL
+            # Log the proxy with its password redacted (OWASP A09).
+            logger.debug("TripAdvisor using proxy %s", settings.get_safe_proxy_url())
 
         for attempt in range(1, FETCH_ATTEMPTS + 1):
             self.rate_limiter.acquire_sync()

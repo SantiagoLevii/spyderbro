@@ -10,6 +10,19 @@ EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 BLOCKED_LOCAL_PARTS = ("noreply", "no-reply", "donotreply", "mailer", "daemon")
 BLOCKED_DOMAINS = ("example.com", "test.com", "domain.com")
 
+# Technical / infrastructure / placeholder domains that are never real contact
+# emails (Sentry DSNs, CDNs, PaaS hosts, demo addresses). Matched as the exact
+# domain or any subdomain of it.
+TECHNICAL_DOMAINS_BLACKLIST = (
+    "sentry.io", "sentry-next.wixpress.com", "wixpress.com",
+    "amazonaws.com", "cloudfront.net", "fastly.net",
+    "akamai.net", "cloudflare.com", "heroku.com",
+    "netlify.app", "vercel.app", "github.io",
+    "googleapis.com", "googletagmanager.com",
+    "example.com", "test.com", "domain.com", "email.com",
+    "johndoe.com", "placeholder.com",
+)
+
 MAX_EMAIL_LENGTH = 254
 
 
@@ -44,6 +57,11 @@ def is_valid_email(email: str) -> bool:
 
     if domain in BLOCKED_DOMAINS:
         return False
+
+    # Reject technical/infrastructure/placeholder domains (and their subdomains).
+    for blocked in TECHNICAL_DOMAINS_BLACKLIST:
+        if domain == blocked or domain.endswith("." + blocked):
+            return False
 
     tld = domain.rsplit(".", 1)[-1]
     if len(tld) <= 1:

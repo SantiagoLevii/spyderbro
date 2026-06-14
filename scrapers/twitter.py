@@ -7,6 +7,9 @@ from scrapling import StealthyFetcher
 
 from config.settings import settings
 from models.lead import Lead
+from utils.abort import AbortMixin
+from utils.browser_config import get_stealth_fetch_kwargs
+from utils.cookies import load_cookies
 from utils.rate_limiter import RateLimiter
 from utils.retry import async_retry
 from utils.validators import is_valid_email, normalize_phone
@@ -48,7 +51,7 @@ def extract_phone_from_bio(bio: str) -> str:
     return ""
 
 
-class TwitterScraper:
+class TwitterScraper(AbortMixin):
     """Scrapes business leads from public Twitter/X profiles.
 
     No API key and no login — public pages only. X login-walls search and
@@ -57,10 +60,15 @@ class TwitterScraper:
 
     PROFILE_URL = "https://x.com/{username}"
     SEARCH_URL = "https://x.com/search?q={keyword}&f=user"
-    TIMEOUT_MS = 30000
+    TIMEOUT_MS = 12000
+
+    SOURCE = "twitter"
 
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        self.cookies = load_cookies(self.SOURCE)
+        self.source = self.SOURCE
+        self.aborted_reason = ""
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
         """Synchronous entry point for the CLI scraper registry.
@@ -165,15 +173,21 @@ class TwitterScraper:
             Leads for the profiles that could be scraped.
         """
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        self._start_guard()
 
         async def scrape_one(username: str) -> Lead | None:
             async with semaphore:
+                if self._should_abort():
+                    return None
                 await self._random_delay()
                 try:
-                    return await self.scrape_profile(username)
+                    lead = await self.scrape_profile(username)
                 except Exception as exc:
                     logger.error("Error scraping profile %r: %s", username, exc)
+                    self._record_fetch(False)
                     return None
+                self._record_fetch(lead is not None)
+                return lead
 
         results = await asyncio.gather(*(scrape_one(u) for u in usernames))
         return [lead for lead in results if lead is not None]
@@ -187,14 +201,10 @@ class TwitterScraper:
         for attempt in (1, 2):
             try:
                 await self.rate_limiter.acquire()
+                fetch_kwargs = get_stealth_fetch_kwargs(timeout=self.TIMEOUT_MS, solve_cloudflare=True)
+                fetch_kwargs["cookies"] = self.cookies
                 page = await async_retry(
-                    lambda: asyncio.to_thread(
-                        StealthyFetcher.fetch,
-                        url,
-                        headless=True,
-                        solve_cloudflare=True,
-                        timeout=self.TIMEOUT_MS,
-                    ),
+                    lambda: asyncio.to_thread(StealthyFetcher.fetch, url, **fetch_kwargs),
                     max_retries=2,
                 )
             except Exception as exc:

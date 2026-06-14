@@ -277,6 +277,16 @@ def print_error(message: str) -> None:
     print(f"{Fore.RED}ERROR: {message}{Style.RESET_ALL}")
 
 
+def print_warning(message: str) -> None:
+    """Print a non-fatal warning in yellow."""
+    print(f"{Fore.YELLOW}⚠ {message}{Style.RESET_ALL}")
+
+
+def print_success(message: str) -> None:
+    """Print a success message in green."""
+    print(f"{Fore.GREEN}✓ {message}{Style.RESET_ALL}")
+
+
 def print_linkedin_proxy_warning() -> None:
     """Warn that LinkedIn runs in conservative mode without a proxy."""
     print(f"{Fore.YELLOW}[LINKEDIN] ⚠ Sin proxy configurado — modo conservador activado")

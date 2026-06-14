@@ -7,6 +7,8 @@ from scrapling import StealthyFetcher
 
 from config.settings import settings
 from models.lead import Lead
+from utils.abort import AbortMixin
+from utils.browser_config import get_stealth_fetch_kwargs
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 from utils.validators import normalize_phone
@@ -34,7 +36,7 @@ def parse_property_query(query: str) -> tuple[str, str, str]:
     return "inmuebles", operation, location
 
 
-class ZonapropScraper:
+class ZonapropScraper(AbortMixin):
     """Scrapes real-estate agencies (not properties) from Zonaprop.
 
     Zonaprop is behind Cloudflare and hides the agency name on listing cards
@@ -48,6 +50,8 @@ class ZonapropScraper:
 
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        self.source = SOURCE
+        self.aborted_reason = ""
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
         """CLI/pipeline entry point. Query is '<operation> <location>'."""
@@ -70,9 +74,10 @@ class ZonapropScraper:
         """
         leads: list[Lead] = []
         seen: set[str] = set()
+        self._start_guard()
 
         for page_num in range(1, MAX_PAGES + 1):
-            if len(leads) >= limit:
+            if len(leads) >= limit or self._should_abort():
                 break
             slug = f"{property_type}-{operation}-{location}"
             url = f"{self.BASE_URL}/{slug}.html"
@@ -80,8 +85,11 @@ class ZonapropScraper:
                 url = f"{self.BASE_URL}/{slug}-pagina-{page_num}.html"
 
             page = self._fetch(url)
+            self._record_fetch(page is not None)
             if page is None:
-                break
+                if self._should_abort():
+                    break
+                continue
 
             postings = self._collect_postings(page)
             if not postings:
@@ -90,9 +98,10 @@ class ZonapropScraper:
 
             added = 0
             for detail_url, card_location in postings:
-                if len(leads) >= limit:
+                if len(leads) >= limit or self._should_abort():
                     break
                 detail = self._fetch(detail_url)
+                self._record_fetch(detail is not None)
                 if detail is None:
                     continue
                 lead = self._parse_detail(detail, card_location or location)
@@ -137,10 +146,9 @@ class ZonapropScraper:
         """Fetch a Cloudflare-protected URL with StealthyFetcher, None on failure."""
         try:
             self.rate_limiter.acquire_sync()
+            fetch_kwargs = get_stealth_fetch_kwargs(timeout=TIMEOUT_MS, solve_cloudflare=True)
             page = sync_retry(
-                lambda: StealthyFetcher.fetch(
-                    url, headless=True, solve_cloudflare=True, timeout=TIMEOUT_MS
-                ),
+                lambda: StealthyFetcher.fetch(url, **fetch_kwargs),
                 max_retries=2,
             )
         except Exception as exc:

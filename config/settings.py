@@ -32,6 +32,14 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean env var (true/1/yes/on), falling back to default."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 class Settings:
     """Application settings loaded from environment variables via .env."""
 
@@ -43,6 +51,20 @@ class Settings:
     PROXY_URL: str = os.getenv("PROXY_URL", "")
     APIFY_TOKEN: str = os.getenv("APIFY_TOKEN", "")
 
+    # Email scraping — the heaviest enrichment step (one extra site visit per
+    # lead with a website). Tunable / disableable for speed.
+    EMAIL_SCRAPING_ENABLED: bool = _env_bool("EMAIL_SCRAPING_ENABLED", True)
+    EMAIL_SCRAPING_TIMEOUT: int = _env_int("EMAIL_SCRAPING_TIMEOUT", 3)
+    EMAIL_SCRAPING_MAX_PAGES: int = _env_int("EMAIL_SCRAPING_MAX_PAGES", 1)
+    EMAIL_SCRAPING_MAX_CONCURRENT: int = _env_int("EMAIL_SCRAPING_MAX_CONCURRENT", 10)
+
+    # Performance (0 = auto from the detected hardware profile).
+    WORKERS: int = _env_int("WORKERS", 0)
+    NETWORK_IDLE: bool = _env_bool("NETWORK_IDLE", False)
+    BLOCK_RESOURCES: bool = _env_bool("BLOCK_RESOURCES", True)
+    BROWSER_REUSE: bool = _env_bool("BROWSER_REUSE", True)
+    MAX_CONCURRENT_SOURCES: int = _env_int("MAX_CONCURRENT_SOURCES", 0)
+
     # Runtime-only options set by the CLI (not env-backed). LOCATION feeds the
     # Argentina-pack scrapers that need a province/city; DATEAS_TYPE selects the
     # Dateas search mode. Defaults keep them harmless when unset.
@@ -50,6 +72,30 @@ class Settings:
     DATEAS_TYPE: str = "empresas"
     DATEAS_LOOKUP: str = "name"
     ML_OFFICIAL_ONLY: bool = False
+
+    def get_safe_proxy_url(self) -> str:
+        """Return ``PROXY_URL`` with the password redacted, for safe logging.
+
+        Example: ``http://user:secret@host:8080`` -> ``http://user:***@host:8080``.
+
+        Returns:
+            The proxy URL with its password masked, or "" when no proxy is set.
+        """
+        if not self.PROXY_URL:
+            return ""
+        try:
+            from urllib.parse import urlparse, urlunparse
+
+            parsed = urlparse(self.PROXY_URL)
+            if parsed.password:
+                host = parsed.hostname or ""
+                netloc = f"{parsed.username}:***@{host}"
+                if parsed.port:
+                    netloc += f":{parsed.port}"
+                return urlunparse(parsed._replace(netloc=netloc))
+        except Exception:  # noqa: BLE001 - redaction must never raise
+            return "***"
+        return self.PROXY_URL
 
 
 settings = Settings()

@@ -1,4 +1,5 @@
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -61,8 +62,35 @@ DATEAS_COLUMNS: list[Column] = [
     ("Tipo", 12, _entity_type),
 ]
 
+# Appended only when a multi-query run tags leads with their originating query.
+QUERY_COLUMN: Column = ("Query", 25, _raw("query"))
+
 HEADER_ROW_HEIGHT = 20
 DATA_ROW_HEIGHT = 16
+
+
+def build_output_filename(query: str, output_format: str = "csv") -> str:
+    """Build the output filename from the user's query, with the right extension.
+
+    Args:
+        query: The original query (e.g. "inmobiliarias lujan", or a multi-query
+            like "inmobiliaria lujan -- santiago gomez").
+        output_format: Selected output format, ``"csv"`` (Excel) or ``"json"``.
+            Drives the extension so JSON output never gets an ``.xlsx`` name.
+
+    Returns:
+        A safe filename with the correct extension, e.g. "inmobiliarias_lujan.xlsx"
+        for ``"csv"`` or "inmobiliarias_lujan.json" for ``"json"``.
+    """
+    def _slug(part: str) -> str:
+        cleaned = re.sub(r"[^\w\s-]", "", part.lower())
+        cleaned = re.sub(r"\s+", "_", cleaned.strip())
+        return re.sub(r"_+", "_", cleaned).strip("_")
+
+    parts = [_slug(p) for p in query.split("--")]
+    name = "__".join(p for p in parts if p)
+    extension = "json" if output_format == "json" else "xlsx"
+    return f"{name[:80] or 'scrapbro'}.{extension}"
 
 
 class CSVExporter:
@@ -75,7 +103,7 @@ class CSVExporter:
     contains leads from the ``dateas`` source.
     """
 
-    def export(self, leads: list[Lead], filename: str) -> str:
+    def export(self, leads: list[Lead], filename: str) -> str | None:
         """Save leads to a styled .xlsx file in the configured output directory.
 
         Args:
@@ -83,12 +111,14 @@ class CSVExporter:
             filename: Base filename; a .csv suffix is swapped to .xlsx.
 
         Returns:
-            Absolute path to the generated .xlsx file.
+            Absolute path to the generated .xlsx file, or None when there are no
+            leads (no empty workbook is written).
         """
-        path = ensure_dir(Path(settings.OUTPUT_DIR)) / Path(filename).with_suffix(".xlsx").name
-
         if not leads:
-            logger.warning("No leads to export — writing empty workbook at %s", path)
+            logger.warning("No leads to export — skipping file creation")
+            return None
+
+        path = ensure_dir(Path(settings.OUTPUT_DIR)) / Path(filename).with_suffix(".xlsx").name
 
         columns = self._columns_for(leads)
 
@@ -112,9 +142,18 @@ class CSVExporter:
 
     @staticmethod
     def _columns_for(leads: list[Lead]) -> list[Column]:
-        """Return base columns plus Dateas columns when dateas leads are present."""
-        has_dateas = any(lead.source == "dateas" for lead in leads)
-        return BASE_COLUMNS + DATEAS_COLUMNS if has_dateas else list(BASE_COLUMNS)
+        """Return the column set for this result.
+
+        Base columns are always present. The six Dateas columns are appended
+        when any lead is from the ``dateas`` source; a ``Query`` column is
+        appended when leads carry an originating query (multi-query runs).
+        """
+        columns = list(BASE_COLUMNS)
+        if any(lead.source == "dateas" for lead in leads):
+            columns += DATEAS_COLUMNS
+        if any((lead.raw_data or {}).get("query") for lead in leads):
+            columns.append(QUERY_COLUMN)
+        return columns
 
     @staticmethod
     def _write_header(sheet, columns: list[Column]) -> None:

@@ -7,6 +7,7 @@ apify_fingerprint_datapoints==0.13.0
 asttokens==3.0.1
 attrs==26.1.0
 beautifulsoup4==4.15.0
+browser-cookie3==0.20.1
 browserforge==1.2.4
 certifi==2026.5.20
 cffi==2.0.0
@@ -33,6 +34,7 @@ jedi==0.20.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 lxml==6.1.1
+lz4==4.4.5
 markdown-it-py==4.2.0
 markdownify==1.2.2
 matplotlib-inline==0.2.2
@@ -54,6 +56,7 @@ Protego==0.6.1
 psutil==7.2.2
 pure_eval==0.2.3
 pycparser==3.0
+pycryptodomex==3.23.0
 pydantic==2.13.4
 pydantic-settings==2.14.1
 pydantic_core==2.46.4
@@ -71,6 +74,7 @@ referencing==0.37.0
 rich==15.0.0
 rpds-py==2026.5.1
 scrapling==0.4.9
+shadowcopy==0.0.4
 six==1.17.0
 soupsieve==2.8.4
 sse-starlette==3.4.4
@@ -85,4 +89,5 @@ uvicorn==0.49.0
 w3lib==2.4.1
 wcwidth==0.8.1
 windows-curses==2.4.2
+WMI==1.5.1
 yarl==1.24.2

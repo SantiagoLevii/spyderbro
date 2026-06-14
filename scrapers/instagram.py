@@ -8,6 +8,9 @@ from scrapling import StealthyFetcher
 
 from config.settings import settings
 from models.lead import Lead
+from utils.abort import AbortMixin
+from utils.browser_config import get_stealth_fetch_kwargs
+from utils.cookies import load_cookies
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 from utils.validators import is_valid_email, normalize_phone
@@ -25,7 +28,7 @@ MIN_DELAY_SECONDS = 3.0
 MAX_DELAY_SECONDS = 7.0
 
 
-class InstagramScraper:
+class InstagramScraper(AbortMixin):
     """Scrapes business leads from public Instagram profiles.
 
     Only public data is accessed — no login, no official API. Follower lists
@@ -36,10 +39,15 @@ class InstagramScraper:
     PROFILE_URL = "https://www.instagram.com/{username}/"
     FOLLOWERS_URL = "https://www.instagram.com/{username}/followers/"
     HASHTAG_URL = "https://www.instagram.com/explore/tags/{hashtag}/"
-    TIMEOUT_MS = 30000
+    TIMEOUT_MS = 12000
+
+    SOURCE = "instagram"
 
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        self.cookies = load_cookies(self.SOURCE)
+        self.source = self.SOURCE
+        self.aborted_reason = ""
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
         """Dispatch by query prefix.
@@ -196,15 +204,18 @@ class InstagramScraper:
             Collected leads.
         """
         leads: list[Lead] = []
+        self._start_guard()
         for username in usernames:
-            if len(leads) >= limit:
+            if len(leads) >= limit or self._should_abort():
                 break
             self._random_delay()
             try:
                 lead = self.scrape_profile_bio(username)
             except Exception as exc:
                 logger.error("Error scraping profile %r: %s", username, exc)
+                self._record_fetch(False)
                 continue
+            self._record_fetch(lead is not None)
             if lead is None:
                 continue
             if require_contact and not (lead.email or lead.phone):
@@ -225,13 +236,10 @@ class InstagramScraper:
         for attempt in (1, 2):
             try:
                 self.rate_limiter.acquire_sync()
+                fetch_kwargs = get_stealth_fetch_kwargs(timeout=self.TIMEOUT_MS, solve_cloudflare=True)
+                fetch_kwargs["cookies"] = self.cookies
                 page = sync_retry(
-                    lambda: StealthyFetcher.fetch(
-                        url,
-                        headless=True,
-                        solve_cloudflare=True,
-                        timeout=self.TIMEOUT_MS,
-                    ),
+                    lambda: StealthyFetcher.fetch(url, **fetch_kwargs),
                     max_retries=2,
                 )
             except Exception as exc:

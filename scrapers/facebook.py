@@ -8,6 +8,9 @@ from scrapling import StealthyFetcher
 
 from config.settings import settings
 from models.lead import Lead
+from utils.abort import AbortMixin
+from utils.browser_config import get_stealth_fetch_kwargs
+from utils.cookies import load_cookies
 from utils.rate_limiter import RateLimiter
 from utils.retry import sync_retry
 from utils.validators import is_valid_email, normalize_phone
@@ -30,7 +33,7 @@ MIN_DELAY_SECONDS = 4.0
 MAX_DELAY_SECONDS = 8.0
 
 
-class FacebookScraper:
+class FacebookScraper(AbortMixin):
     """Scrapes business leads from public Facebook Pages.
 
     Only public pages are accessed — no login, no personal profiles, no
@@ -40,10 +43,15 @@ class FacebookScraper:
 
     SEARCH_URL = "https://www.facebook.com/search/pages/?q={query}"
     PAGE_URL = "https://www.facebook.com/{slug}/"
-    TIMEOUT_MS = 15000
+    TIMEOUT_MS = 12000
+
+    SOURCE = "facebook"
 
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+        self.cookies = load_cookies(self.SOURCE)
+        self.source = self.SOURCE
+        self.aborted_reason = ""
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
         """Search Facebook Pages and extract lead data from each result.
@@ -86,15 +94,18 @@ class FacebookScraper:
             return []
 
         leads: list[Lead] = []
+        self._start_guard()
         for slug in slugs:
-            if len(leads) >= limit:
+            if len(leads) >= limit or self._should_abort():
                 break
             self._random_delay()
             try:
                 lead = self.scrape_page(self.PAGE_URL.format(slug=slug))
             except Exception as exc:
                 logger.error("Error scraping page %r: %s", slug, exc)
+                self._record_fetch(False)
                 continue
+            self._record_fetch(lead is not None)
             if lead is not None:
                 leads.append(lead)
 
@@ -161,13 +172,10 @@ class FacebookScraper:
         """Fetch a URL with StealthyFetcher, returning None on any failure."""
         try:
             self.rate_limiter.acquire_sync()
+            fetch_kwargs = get_stealth_fetch_kwargs(timeout=self.TIMEOUT_MS, solve_cloudflare=True)
+            fetch_kwargs["cookies"] = self.cookies
             page = sync_retry(
-                lambda: StealthyFetcher.fetch(
-                    url,
-                    headless=True,
-                    solve_cloudflare=True,
-                    timeout=self.TIMEOUT_MS,
-                ),
+                lambda: StealthyFetcher.fetch(url, **fetch_kwargs),
                 max_retries=2,
             )
         except Exception as exc:

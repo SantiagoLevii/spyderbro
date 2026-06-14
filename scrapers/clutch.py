@@ -97,6 +97,12 @@ class ClutchScraper:
                 break
             self._random_delay()
 
+        if not leads and "argentina" in country_norm:
+            logger.info(
+                "Clutch: no AR-specific data found. "
+                "Try 'digital-marketing' without location for global results."
+            )
+
         logger.info("Clutch scrape complete: %d leads (country filter=%r)", len(leads), country)
         return leads[:limit]
 

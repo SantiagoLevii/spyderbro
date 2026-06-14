@@ -48,11 +48,10 @@ def test_xlsx_totals_row(sample_leads):
     assert "Con teléfono:" in value
 
 
-def test_xlsx_export_empty_list():
-    path = Path(CSVExporter().export([], "empty.csv"))
-    assert path.exists()
-    sheet = load_workbook(path).active
-    assert sheet.cell(row=2, column=1).value.startswith("Total: 0 leads")
+def test_xlsx_export_empty_list(tmp_path):
+    # No leads -> no file is written and export returns None (Fix 6).
+    assert CSVExporter().export([], "empty.csv") is None
+    assert not (tmp_path / "empty.xlsx").exists()
 
 
 def test_json_export_roundtrip(sample_leads):

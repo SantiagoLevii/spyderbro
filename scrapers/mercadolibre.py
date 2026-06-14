@@ -8,12 +8,16 @@ from scrapling import StealthyFetcher
 from config.settings import settings
 from models.lead import Lead
 from scrapers.email_scraper import EmailScraper
+from utils.abort import AbortMixin
+from utils.browser_config import get_stealth_fetch_kwargs
+from utils.cookies import load_cookies
 from utils.rate_limiter import RateLimiter
 from utils.validators import is_valid_email
 
 logger = logging.getLogger(__name__)
 
 REQUESTS_PER_MINUTE = 10
+# ML renders with heavy JS and needs a generous timeout (single source of truth).
 TIMEOUT_MS = 25000
 MAX_PAGES = 5
 RESULTS_PER_PAGE = 50
@@ -25,7 +29,7 @@ SOURCE = "mercadolibre"
 _ANTIBOT_MARKERS = ("micro-landing-container", "snoopy-script", "requires javascript")
 
 
-class MercadoLibreScraper:
+class MercadoLibreScraper(AbortMixin):
     """Scrapes sellers (stores) from MercadoLibre Argentina via public HTML.
 
     The official API now requires OAuth2, so this scrapes the public site with
@@ -45,6 +49,9 @@ class MercadoLibreScraper:
     def __init__(self) -> None:
         self.rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
         self.email_scraper = EmailScraper()
+        self.cookies = load_cookies(SOURCE)
+        self.source = SOURCE
+        self.aborted_reason = ""
 
     def scrape(self, query: str, limit: int = settings.DEFAULT_LIMIT) -> list[Lead]:
         """CLI/pipeline entry point. Query is the product category.
@@ -72,9 +79,10 @@ class MercadoLibreScraper:
         cat = quote(category.strip().replace(" ", "-"))
         leads: list[Lead] = []
         seen: set[str] = set()
+        self._start_guard()
 
         for page_num in range(MAX_PAGES):
-            if len(leads) >= limit:
+            if len(leads) >= limit or self._should_abort():
                 break
             url = f"{self.LISTADO_URL}/{cat}"
             if official_stores_only:
@@ -84,6 +92,7 @@ class MercadoLibreScraper:
                 url += f"_Desde_{offset}"
 
             listing = self._fetch(url)
+            self._record_fetch(listing is not None)
             if listing is None:
                 break
 
@@ -94,12 +103,13 @@ class MercadoLibreScraper:
 
             added = 0
             for nick in nicknames:
-                if len(leads) >= limit:
+                if len(leads) >= limit or self._should_abort():
                     break
                 if nick in seen:
                     continue
                 seen.add(nick)
                 lead = self.scrape_seller_profile(nick, category)
+                self._record_fetch(lead is not None)
                 if lead is None:
                     continue
                 leads.append(lead)
@@ -156,7 +166,7 @@ class MercadoLibreScraper:
                 rating = 0.0
 
         email = ""
-        if website:
+        if website and settings.EMAIL_SCRAPING_ENABLED:
             try:
                 found = self.email_scraper.extract_from_website(website)
                 if found and is_valid_email(found):
@@ -190,10 +200,22 @@ class MercadoLibreScraper:
         return nicks
 
     def _fetch(self, url: str):
-        """Fetch a URL with StealthyFetcher; None on failure or anti-bot shell."""
-        kwargs = dict(headless=True, network_idle=True, solve_cloudflare=True, timeout=TIMEOUT_MS)
+        """Fetch a URL with StealthyFetcher; None on failure or anti-bot shell.
+
+        MercadoLibre renders its listings with heavy JS, so it always needs
+        ``network_idle=True`` (and a longer timeout) regardless of the global
+        ``settings.NETWORK_IDLE`` default — otherwise the page is the anti-bot
+        micro-landing shell and the source fast-fails as "blocked".
+        """
+        kwargs = get_stealth_fetch_kwargs(
+            network_idle=True, timeout=TIMEOUT_MS, solve_cloudflare=True,
+        )
         if settings.PROXY_URL:
             kwargs["proxy"] = settings.PROXY_URL
+            # Log the proxy with its password redacted (OWASP A09).
+            logger.debug("MercadoLibre using proxy %s", settings.get_safe_proxy_url())
+        if self.cookies:
+            kwargs["cookies"] = self.cookies
         try:
             self.rate_limiter.acquire_sync()
             page = StealthyFetcher.fetch(url, **kwargs)
